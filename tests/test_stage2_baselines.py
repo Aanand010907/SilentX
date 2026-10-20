@@ -183,10 +183,12 @@ def test_atc_tie_breaking_behavior():
     atc_mon = AverageThresholdedConfidenceEstimator.fit_threshold(cal_probs, cal_acc)
     assert atc_mon.atc_threshold == pytest.approx(0.8, abs=1e-5)
 
-    # Test target with ties
+    # Test target with ties: with exact fractional tie-weighting,
+    # target instances on the plateau are assigned tie_weight = 0.80, matching cal_acc
+    # (previously, naive step thresholding returned 1.0, overestimating by +0.20)
     target_probs = np.array([0.8] * 50)
     est_acc = atc_mon.estimate_accuracy(target_probs)
-    assert est_acc == 1.0
+    assert est_acc == pytest.approx(0.80, abs=1e-5)
 
 
 def test_cbpe_multiclass_confusion_matrix():
@@ -268,3 +270,145 @@ def test_full_electricity_deployment_coverage():
             assert win_len == 500
 
     assert covered_samples == total_deploy
+
+
+# =====================================================================
+# 8. STAGE 2 ACCEPTANCE AUDIT REGRESSION TESTS
+# =====================================================================
+
+def test_pure_concept_inversion_impossibility_boundary():
+    """Verify that pure concept inversion with identical X produces identical monitor signals.
+
+    Fundamental impossibility boundary: Label-free monitors f(X, theta) receive identical inputs
+    and cannot identify that World B performance collapsed by over 50 percentage points without labels.
+    """
+    from src.models.frozen_pipeline import train_and_freeze_pipeline
+    from src.monitors.trustguard import TrustGuardCompositeMonitor
+    from src.data.dataset_registry import DatasetRegistry
+
+    bundle = DatasetRegistry.load_dataset("synthetic_stream", source_train_ratio=0.75, window_size=300, n_source_samples=3000, seed=42)
+    pipe = train_and_freeze_pipeline(bundle.X_source_train, bundle.y_source_train, bundle.X_source_cal, bundle.y_source_cal, bundle.feature_names, seed=42)
+
+    rng = np.random.default_rng(42)
+    n = 300
+    X_shared = rng.standard_normal((n, 10))
+    X_df = pd.DataFrame(X_shared, columns=bundle.feature_names)
+
+    # World A: source conditional mechanism
+    logits_A = 2.2 * X_shared[:, 0] - 1.8 * X_shared[:, 1] + 1.4 * (X_shared[:, 0] * X_shared[:, 2])
+    probs_A = 1.0 / (1.0 + np.exp(-logits_A))
+    y_A = (rng.random(n) < probs_A).astype(int)
+
+    # World B: pure concept inversion (labels flipped)
+    y_B = 1 - y_A
+
+    probs_prim = pipe.predict_primary_proba(X_df)
+    acc_A = float(np.mean(y_A == (probs_prim >= 0.5)))
+    acc_B = float(np.mean(y_B == (probs_prim >= 0.5)))
+
+    # Performance collapsed dramatically in World B
+    assert acc_A > 0.70
+    assert acc_B < 0.30
+    assert abs(acc_A - acc_B) > 0.40
+
+    # Deterministic label-free monitors must produce exactly identical signals
+    ks_mon = KSMaxDriftDetector(bundle.X_source_cal)
+    psi_mon = PopulationStabilityIndexDetector(bundle.X_source_cal)
+    jsd_mon = JensenShannonDivergenceDetector(bundle.X_source_cal)
+    atc_mon = AverageThresholdedConfidenceEstimator(pipe.atc_threshold, tie_weight=pipe.atc_tie_weight)
+    doc_mon = DifferenceOfConfidencesEstimator(pipe.source_cal_acc, pipe.source_cal_mean_conf)
+    cbpe_mon = CBPEPerformanceEstimator()
+    tg_mon = TrustGuardCompositeMonitor(pipe, bundle.X_source_cal, seed=42)
+
+    # Signals for World A and World B
+    assert ks_mon.evaluate_window(X_df) == pytest.approx(ks_mon.evaluate_window(X_df), abs=1e-12)
+    assert psi_mon.evaluate_window(X_df) == pytest.approx(psi_mon.evaluate_window(X_df), abs=1e-12)
+    assert jsd_mon.evaluate_window(X_df) == pytest.approx(jsd_mon.evaluate_window(X_df), abs=1e-12)
+    assert atc_mon.estimate_accuracy(probs_prim) == pytest.approx(atc_mon.estimate_accuracy(probs_prim), abs=1e-12)
+    assert doc_mon.estimate_accuracy(probs_prim) == pytest.approx(doc_mon.estimate_accuracy(probs_prim), abs=1e-12)
+    assert cbpe_mon.estimate_accuracy(probs_prim) == pytest.approx(cbpe_mon.estimate_accuracy(probs_prim), abs=1e-12)
+
+    tg_A = tg_mon.evaluate_window(X_df)
+    tg_B = tg_mon.evaluate_window(X_df)
+    assert tg_A["risk_tg"] == pytest.approx(tg_B["risk_tg"], abs=1e-12)
+    assert tg_A["is_alarm"] == tg_B["is_alarm"]
+
+
+def test_atc_exact_calibration_recovery_with_ties():
+    """Verify that fractional tie-weighting recovers exact source calibration accuracy under discrete step confidences."""
+    # Create synthetic step confidence distribution mimicking isotonic calibration plateaus
+    # 20% at 0.60, 30% at 0.70, 50% at 0.90
+    n = 1000
+    conf = np.array([0.60] * 200 + [0.70] * 300 + [0.90] * 500)
+    # Ground truth accuracy: 0.75 (so error rate = 0.25)
+    # Quantile at 0.25 falls on the 0.70 plateau
+    cal_acc = 0.75
+
+    atc = AverageThresholdedConfidenceEstimator.fit_threshold(conf, cal_acc)
+    recovered_acc = atc.estimate_accuracy(conf)
+
+    # Must recover cal_acc to machine precision
+    assert recovered_acc == pytest.approx(cal_acc, abs=1e-6)
+
+    # Contrast with naive step counting without tie weight
+    naive_est = float(np.mean(conf >= atc.atc_threshold))
+    assert naive_est > cal_acc + 0.04  # Demonstrates previous over-estimation bug
+
+
+def test_moving_block_bootstrap_finite_p_value_and_reproducibility():
+    """Verify that moving-block bootstrap uses finite-resampling correction and never reports 0.0000."""
+    from run_stage2_benchmark import moving_block_bootstrap
+
+    # Constant positive difference (zero tail counts)
+    diff = np.ones(50) * 0.10
+    n_boot = 2000
+
+    obs_mean, ci_low, ci_high, p_val = moving_block_bootstrap(
+        diff, block_length=3, n_bootstraps=n_boot, seed=42
+    )
+
+    assert obs_mean == pytest.approx(0.10, abs=1e-6)
+    assert ci_low > 0.0
+    assert ci_high > 0.0
+    # Must be strictly positive: 2 * (0 + 1) / 2001 ~ 0.0010
+    assert p_val > 0.0
+    assert p_val == pytest.approx(2.0 / (n_boot + 1.0), abs=1e-6)
+    assert p_val != 0.0
+
+    # Test reproducibility
+    _, _, _, p_val_rep = moving_block_bootstrap(
+        diff, block_length=3, n_bootstraps=n_boot, seed=42
+    )
+    assert p_val == p_val_rep
+
+
+def test_harmless_drift_linear_attribution_suppresses_cubic_amplification():
+    """Verify that linear attribution weighting prevents noise features from inflating marginal drift."""
+    from src.monitors.trustguard import AttributionWeightedDriftMonitor
+
+    d = 10
+    # Features 0..2 are causal (weights 0.40, 0.40, 0.10)
+    # Features 5..9 are noise with small finite-sample weights summing to 0.10
+    weights = np.array([0.40, 0.40, 0.10, 0.0, 0.0, 0.02, 0.02, 0.02, 0.02, 0.02])
+    corr = np.eye(d)
+
+    rng = np.random.default_rng(42)
+    X_cal = pd.DataFrame(rng.standard_normal((500, d)))
+
+    monitor = AttributionWeightedDriftMonitor(X_cal, shap_weights=weights, corr_cal=corr)
+
+    # Harmless drift: noise features 5..9 shift dramatically (KS ~ 1.0)
+    # Causal features 0..2 do NOT shift (KS ~ 0.0)
+    X_deploy = X_cal.copy()
+    for col in range(5, 10):
+        X_deploy.iloc[:, col] += 5.0
+
+    out = monitor.evaluate_window(X_deploy)
+
+    # Linear d_marg reflects true attribution expectation (~0.10)
+    assert out["d_marg"] == pytest.approx(0.10, abs=0.03)
+    # Cubic d_marg_l3 inflated the drift up to ~0.46
+    assert out["d_marg_l3"] > 0.40
+    # Linear s_attr is substantially smaller than cubic
+    assert out["d_marg"] < 0.20
+

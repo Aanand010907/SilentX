@@ -211,15 +211,16 @@ class DifferenceOfConfidencesEstimator:
 class AverageThresholdedConfidenceEstimator:
     """Average Thresholded Confidence (ATC) accuracy estimator (Garg et al., 2022).
 
-    Learns threshold t* on source calibration set such that:
-    mean( Conf(D_cal) < t* ) = 1 - Acc(D_cal)
+    Learns threshold t* and fractional tie weight gamma on source calibration set such that:
+    E[Acc_ATC(D_cal)] = Acc(D_cal)
 
     Estimated deployment accuracy:
-    Acc_ATC(W_t) = (1/m) sum I( Conf(x_i) >= t* )
+    Acc_ATC(W_t) = (1/m) sum [ I( Conf(x_i) > t* ) + gamma * I( Conf(x_i) == t* ) ]
     """
 
-    def __init__(self, atc_threshold: float):
+    def __init__(self, atc_threshold: float, tie_weight: float = 1.0):
         self.atc_threshold = float(atc_threshold)
+        self.tie_weight = float(tie_weight)
 
     @classmethod
     def fit_threshold(cls, cal_probs: np.ndarray, cal_acc: float) -> "AverageThresholdedConfidenceEstimator":
@@ -230,9 +231,21 @@ class AverageThresholdedConfidenceEstimator:
             conf = np.max(p, axis=1)
 
         err_rate = float(np.clip(1.0 - cal_acc, 0.0, 1.0))
-        # Handle ties and finite calibration using method='higher'
         threshold = float(np.quantile(conf, err_rate, method="higher"))
-        return cls(atc_threshold=threshold)
+
+        # Fractional tie-weighting for discrete step distributions (e.g. Isotonic Regression)
+        tol = 1e-9
+        is_greater = conf > threshold + tol
+        is_equal = np.abs(conf - threshold) <= tol
+        p_greater = float(np.mean(is_greater))
+        p_equal = float(np.mean(is_equal))
+
+        if p_equal > 1e-12:
+            tie_weight = float(np.clip((cal_acc - p_greater) / p_equal, 0.0, 1.0))
+        else:
+            tie_weight = 1.0
+
+        return cls(atc_threshold=threshold, tie_weight=tie_weight)
 
     def estimate_accuracy(self, predicted_probs: np.ndarray) -> float:
         p = np.asarray(predicted_probs, dtype=float)
@@ -241,7 +254,10 @@ class AverageThresholdedConfidenceEstimator:
         else:
             conf_t = np.max(p, axis=1)
 
-        return float(np.mean(conf_t >= self.atc_threshold))
+        tol = 1e-9
+        is_greater = conf_t > self.atc_threshold + tol
+        is_equal = np.abs(conf_t - self.atc_threshold) <= tol
+        return float(np.mean(is_greater) + self.tie_weight * np.mean(is_equal))
 
 
 class CBPEPerformanceEstimator:

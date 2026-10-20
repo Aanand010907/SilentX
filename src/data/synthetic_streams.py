@@ -128,16 +128,17 @@ class SyntheticStreamGenerator:
             metadata["description"] = "Target class prevalence shift via latent intercept modulation."
 
         elif regime == "concept_shift":
-            # Decision boundary rotates: coefficients on X0 and X1 invert sign
-            # while marginal X features experience minimal displacement
-            X[:, 1] += severity * 0.3
+            # Pure concept shift: observable P(X) is strictly invariant (P(X) = N(0, I_d)),
+            # while the latent conditional decision boundary P(Y|X) rotates.
+            # Impossibility boundary: label-free monitors observe identical P(X)
+            # and cannot identify this performance collapse without ground-truth labels.
             logits = (
                 (2.2 - 4.2 * severity) * X[:, 0]
                 + (-1.8 + 3.8 * severity) * X[:, 1]
                 - 1.4 * (X[:, 0] * X[:, 2])
             )
-            metadata["description"] = "Rotation of the conditional decision hyperplane P(Y|X)."
-            metadata["identifiability_limitation_applies"] = (severity > 0.8)
+            metadata["description"] = "Pure conditional decision boundary rotation P(Y|X) with invariant P(X)."
+            metadata["identifiability_limitation_applies"] = True
 
         elif regime == "confidence_collapse":
             # Extreme OOD extrapolation on causal features + inverted ground truth concept.

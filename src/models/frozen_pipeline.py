@@ -66,6 +66,7 @@ class FrozenModelPipeline:
         source_cal_acc: float,
         source_cal_mean_conf: float,
         source_cal_gdscore: float,
+        atc_tie_weight: float = 1.0,
     ):
         self.preprocessor = preprocessor
         self.primary_tree = primary_tree
@@ -78,6 +79,7 @@ class FrozenModelPipeline:
 
         # Locked source reference statistics
         self.atc_threshold = float(atc_threshold)
+        self.atc_tie_weight = float(atc_tie_weight)
         self.doc_offset = float(doc_offset)
         self.shap_weights = np.asarray(shap_weights, dtype=float)
         self.source_corr_matrix = np.asarray(source_corr_matrix, dtype=float)
@@ -233,8 +235,11 @@ def train_and_freeze_pipeline(
     cal_acc = float(np.mean(cal_ref_preds == y_cal_ref_np))
     cal_mean_conf = float(np.mean(cal_ref_conf))
 
-    # 7. Compute ATC Threshold & DoC Offset on held-out reference
-    atc_threshold = float(np.quantile(cal_ref_conf, max(0.0, 1.0 - cal_acc), method="higher"))
+    # 7. Compute ATC Threshold, Tie Weight & DoC Offset on held-out reference
+    from src.monitors.baselines import AverageThresholdedConfidenceEstimator
+    atc_estimator = AverageThresholdedConfidenceEstimator.fit_threshold(cal_ref_probs, cal_acc)
+    atc_threshold = atc_estimator.atc_threshold
+    atc_tie_weight = atc_estimator.tie_weight
     doc_offset = float(cal_mean_conf - cal_acc)
 
     # 8. Lock Mondrian Conformal Quantiles (alpha = 0.10) on held-out reference
@@ -288,6 +293,7 @@ def train_and_freeze_pipeline(
         d3m_calibrator=d3m_calibrator,
         feature_names=feature_names,
         atc_threshold=atc_threshold,
+        atc_tie_weight=atc_tie_weight,
         doc_offset=doc_offset,
         shap_weights=shap_weights,
         source_corr_matrix=source_corr_matrix,

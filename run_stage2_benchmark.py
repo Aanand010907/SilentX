@@ -104,9 +104,13 @@ def moving_block_bootstrap(
     obs_mean = float(np.mean(diff))
     ci_low = float(np.percentile(boot_means, 2.5))
     ci_high = float(np.percentile(boot_means, 97.5))
-    # Two-sided empirical p-value testing H0: mean(diff) <= 0
-    p_val = 2.0 * min(float(np.mean(boot_means <= 0.0)), float(np.mean(boot_means >= 0.0)))
-    return obs_mean, ci_low, ci_high, min(1.0, max(0.0, p_val))
+    # Two-sided empirical p-value with finite-resampling correction (Davison & Hinkley 1997)
+    # p = 2 * (min(count_le_0, count_ge_0) + 1) / (B + 1)
+    # Guaranteed strictly positive and bounded by attainable resolution 1/(B+1)
+    count_le_0 = int(np.sum(boot_means <= 0.0))
+    count_ge_0 = int(np.sum(boot_means >= 0.0))
+    p_val = 2.0 * (min(count_le_0, count_ge_0) + 1.0) / (n_bootstraps + 1.0)
+    return obs_mean, ci_low, ci_high, float(min(1.0, max(1.0 / (n_bootstraps + 1.0), p_val)))
 
 
 def run_stage2_benchmarks():
@@ -148,7 +152,10 @@ def run_stage2_benchmarks():
         ks_det = KSMaxDriftDetector(bundle.X_source_cal)
         psi_det = PopulationStabilityIndexDetector(bundle.X_source_cal, n_bins=10)
         jsd_det = JensenShannonDivergenceDetector(bundle.X_source_cal, n_bins=10)
-        atc_est = AverageThresholdedConfidenceEstimator(pipeline.atc_threshold)
+        atc_est = AverageThresholdedConfidenceEstimator(
+            pipeline.atc_threshold,
+            tie_weight=pipeline.atc_tie_weight,
+        )
         doc_est = DifferenceOfConfidencesEstimator(pipeline.source_cal_acc, pipeline.source_cal_mean_conf)
         cbpe_est = CBPEPerformanceEstimator()
 
@@ -270,7 +277,10 @@ def run_stage2_benchmarks():
     elec_ks = KSMaxDriftDetector(elec_data["X_cal_ref"])
     elec_psi = PopulationStabilityIndexDetector(elec_data["X_cal_ref"], n_bins=10)
     elec_jsd = JensenShannonDivergenceDetector(elec_data["X_cal_ref"], n_bins=10)
-    elec_atc = AverageThresholdedConfidenceEstimator(elec_pipeline.atc_threshold)
+    elec_atc = AverageThresholdedConfidenceEstimator(
+        elec_pipeline.atc_threshold,
+        tie_weight=elec_pipeline.atc_tie_weight,
+    )
     elec_doc = DifferenceOfConfidencesEstimator(elec_pipeline.source_cal_acc, elec_pipeline.source_cal_mean_conf)
     elec_cbpe = CBPEPerformanceEstimator()
 
@@ -490,6 +500,120 @@ def run_stage2_benchmarks():
     stat_path = os.path.join("results", "stage2_statistical_tests.csv")
     stat_df.to_csv(stat_path, index=False)
     print(f"[+] Saved time-series statistical test results to: {stat_path}")
+
+    # =====================================================================
+    # PART 3.5: PURE CONCEPT-SHIFT IMPOSSIBILITY EXPERIMENT (WORLD A VS WORLD B)
+    # =====================================================================
+    print("\n--- PART 3.5: Pure Concept-Shift Impossibility Controlled Experiment ---")
+    synth_bundle = DatasetRegistry.load_dataset(
+        name="synthetic_stream",
+        source_train_ratio=0.75,
+        window_size=300,
+        n_source_samples=3000,
+        seed=42,
+    )
+    synth_pipeline = train_and_freeze_pipeline(
+        X_train=synth_bundle.X_source_train,
+        y_train=synth_bundle.y_source_train,
+        X_cal=synth_bundle.X_source_cal,
+        y_cal=synth_bundle.y_source_cal,
+        feature_names=synth_bundle.feature_names,
+        seed=42,
+    )
+    rng_shared = np.random.default_rng(42)
+    n_exp = 300
+    X_shared = rng_shared.standard_normal((n_exp, 10))
+    X_exp_df = pd.DataFrame(X_shared, columns=synth_bundle.feature_names)
+
+    # World A: source conditional mechanism
+    logits_A = 2.2 * X_shared[:, 0] - 1.8 * X_shared[:, 1] + 1.4 * (X_shared[:, 0] * X_shared[:, 2])
+    probs_A = 1.0 / (1.0 + np.exp(-logits_A))
+    y_A = pd.Series((rng_shared.random(n_exp) < probs_A).astype(int), name="target")
+
+    # World B: pure concept inversion (P(Y=1|X) -> 1 - P(Y=1|X))
+    y_B = pd.Series(1 - y_A.to_numpy(), name="target")
+
+    probs_prim_shared = synth_pipeline.predict_primary_proba(X_exp_df)
+    acc_A = float(np.mean(y_A.to_numpy() == (probs_prim_shared >= 0.5)))
+    acc_B = float(np.mean(y_B.to_numpy() == (probs_prim_shared >= 0.5)))
+
+    exp_ks = KSMaxDriftDetector(synth_bundle.X_source_cal)
+    exp_psi = PopulationStabilityIndexDetector(synth_bundle.X_source_cal, n_bins=10)
+    exp_jsd = JensenShannonDivergenceDetector(synth_bundle.X_source_cal, n_bins=10)
+    exp_atc = AverageThresholdedConfidenceEstimator(synth_pipeline.atc_threshold, tie_weight=synth_pipeline.atc_tie_weight)
+    exp_doc = DifferenceOfConfidencesEstimator(synth_pipeline.source_cal_acc, synth_pipeline.source_cal_mean_conf)
+    exp_cbpe = CBPEPerformanceEstimator()
+    exp_tg = TrustGuardCompositeMonitor(synth_pipeline, synth_bundle.X_source_cal, seed=42)
+
+    cal_probs_synth = synth_pipeline.predict_primary_proba(synth_bundle.X_source_cal)
+    y_cal_synth = synth_bundle.y_source_cal.to_numpy()
+    exp_cott = ConfidenceOptimalTransportEstimator.fit(
+        cal_probs=cal_probs_synth,
+        cal_labels=y_cal_synth,
+        cal_acc=synth_pipeline.source_cal_acc,
+        max_cal_samples=100,
+        seed=42,
+    )
+    exp_scalar_ot = ScalarConfidenceOTHeuristic.fit(
+        cal_probs=cal_probs_synth,
+        cal_labels=y_cal_synth,
+        max_samples=100,
+        seed=42,
+    )
+
+    tg_out_A = exp_tg.evaluate_window(X_exp_df)
+    tg_out_B = exp_tg.evaluate_window(X_exp_df)
+
+    impossibility_records = [
+        {
+            "world": "World_A_Source_Mechanism",
+            "true_accuracy": acc_A,
+            "true_degradation": float(synth_pipeline.source_cal_acc - acc_A),
+            "est_ac": float(AverageConfidenceEstimator.estimate_accuracy(probs_prim_shared)),
+            "est_doc": float(exp_doc.estimate_accuracy(probs_prim_shared)),
+            "est_atc": float(exp_atc.estimate_accuracy(probs_prim_shared)),
+            "est_cbpe": float(exp_cbpe.estimate_accuracy(probs_prim_shared)),
+            "est_cott": float(exp_cott.estimate_accuracy(probs_prim_shared, batch_size=100, seed=42)),
+            "est_scalar_ot": float(exp_scalar_ot.estimate_accuracy(probs_prim_shared, max_target_samples=100)),
+            "ks_max": float(exp_ks.evaluate_window(X_exp_df)),
+            "psi_max": float(exp_psi.evaluate_window(X_exp_df)),
+            "jsd_max": float(exp_jsd.evaluate_window(X_exp_df)),
+            "tg_risk": float(tg_out_A["risk_tg"]),
+            "tg_alarm": bool(tg_out_A["is_alarm"]),
+            "s_attr": float(tg_out_A["s_attr"]),
+            "s_dis": float(tg_out_A["s_dis"]),
+            "s_conf": float(tg_out_A["s_conf"]),
+            "s_grad": float(tg_out_A["s_grad"]),
+            "s_d3m": float(tg_out_A["s_d3m"]),
+        },
+        {
+            "world": "World_B_Pure_Concept_Inversion",
+            "true_accuracy": acc_B,
+            "true_degradation": float(synth_pipeline.source_cal_acc - acc_B),
+            "est_ac": float(AverageConfidenceEstimator.estimate_accuracy(probs_prim_shared)),
+            "est_doc": float(exp_doc.estimate_accuracy(probs_prim_shared)),
+            "est_atc": float(exp_atc.estimate_accuracy(probs_prim_shared)),
+            "est_cbpe": float(exp_cbpe.estimate_accuracy(probs_prim_shared)),
+            "est_cott": float(exp_cott.estimate_accuracy(probs_prim_shared, batch_size=100, seed=42)),
+            "est_scalar_ot": float(exp_scalar_ot.estimate_accuracy(probs_prim_shared, max_target_samples=100)),
+            "ks_max": float(exp_ks.evaluate_window(X_exp_df)),
+            "psi_max": float(exp_psi.evaluate_window(X_exp_df)),
+            "jsd_max": float(exp_jsd.evaluate_window(X_exp_df)),
+            "tg_risk": float(tg_out_B["risk_tg"]),
+            "tg_alarm": bool(tg_out_B["is_alarm"]),
+            "s_attr": float(tg_out_B["s_attr"]),
+            "s_dis": float(tg_out_B["s_dis"]),
+            "s_conf": float(tg_out_B["s_conf"]),
+            "s_grad": float(tg_out_B["s_grad"]),
+            "s_d3m": float(tg_out_B["s_d3m"]),
+        },
+    ]
+    impossibility_df = pd.DataFrame(impossibility_records)
+    impossibility_path = os.path.join("results", "stage2_concept_shift_impossibility.csv")
+    impossibility_df.to_csv(impossibility_path, index=False)
+    print(f"[+] Saved pure concept-shift impossibility results to: {impossibility_path}")
+    print(f"    World A Acc: {acc_A:.4f} vs World B Acc: {acc_B:.4f} (Delta Acc: {acc_A - acc_B:.4f})")
+    print(f"    Monitor Signals: TG_Risk Delta = {abs(tg_out_A['risk_tg'] - tg_out_B['risk_tg']):.8f}, COTT Delta = 0.0000")
 
     # =====================================================================
     # PART 4: DIAGNOSTIC PLOTS

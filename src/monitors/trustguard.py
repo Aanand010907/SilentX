@@ -37,7 +37,10 @@ class AttributionWeightedDriftMonitor:
             ks_stats.append(res.statistic)
 
         ks_arr = np.array(ks_stats)
-        d_marg = float(np.sum(self.w * (ks_arr ** 3)) ** (1.0 / 3.0))
+        # Linear expectation attribution weighting: sum w_j * KS_j
+        # Avoids L3 cube-root amplification (w_j)^(1/3) on low-attribution noise features
+        d_marg = float(np.sum(self.w * ks_arr))
+        d_marg_l3 = float(np.sum(self.w * (ks_arr ** 3)) ** (1.0 / 3.0))
 
         # 2. Weighted Correlation Matrix Shift
         corr_t = np.corrcoef(X_t, rowvar=False)
@@ -54,7 +57,8 @@ class AttributionWeightedDriftMonitor:
 
         return {
             "s_attr": s_attr,
-            "d_marg_l3": d_marg,
+            "d_marg": d_marg,
+            "d_marg_l3": d_marg_l3,
             "d_corr": float(d_corr),
         }
 
