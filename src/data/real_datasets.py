@@ -37,16 +37,19 @@ class OpenMLElectricityLoader:
         cls,
         cache_dir: str = ".cache/datasets",
         max_samples: Optional[int] = None,
-        source_ratio: float = 0.25,
-        source_train_ratio: float = 0.75,
+        n_train_samples: Optional[int] = 15000,
+        n_cal_samples: Optional[int] = 5000,
         manifest_path: Optional[str] = "results/electricity_manifest.json",
     ) -> Dict[str, any]:
         """Load Electricity dataset, preserving strict chronological ordering.
 
         Chronological protocol:
-        - The earliest source_ratio (default 25%) of the stream is reserved for the source domain.
-        - Within the source domain, the earliest 75% is used for training and the remaining 25% for calibration.
-        - The remaining 75% of the timeline forms sequential deployment windows.
+        - Source training: earliest 15,000 instances (0 to 14,999) used to train base models and fit preprocessor.
+        - Source calibration: 5,000 instances (15,000 to 19,999).
+          - Calibration fit (earliest 2,500: 15,000 to 17,499): fits probability calibrator.
+          - Calibration ref (subsequent 2,500: 17,500 to 19,999): evaluates out-of-sample cal accuracy,
+            sets ATC threshold, DoC offset, Mondrian quantiles, and COTT threshold.
+        - Deployment stream: remaining 25,312 instances (20,000 to 45,311) evaluated in sequential windows.
         """
         os.makedirs(cache_dir, exist_ok=True)
         cache_file = os.path.join(cache_dir, "electricity_151.parquet")
@@ -87,14 +90,29 @@ class OpenMLElectricityLoader:
             X[col] = pd.to_numeric(X[col], errors="coerce").fillna(0.0)
 
         n_total = len(df)
-        n_source = int(n_total * source_ratio)
-        n_train = int(n_source * source_train_ratio)
+        if n_total >= (n_train_samples + n_cal_samples + 100):
+            n_train = int(n_train_samples)
+            n_cal = int(n_cal_samples)
+        else:
+            # Fallback for reduced test fixtures
+            n_train = int(n_total * 0.5)
+            n_cal = int(n_total * 0.25)
+
+        n_source = n_train + n_cal
+        n_cal_fit = n_cal // 2
+        n_cal_ref = n_cal - n_cal_fit
 
         X_train = X.iloc[:n_train].reset_index(drop=True)
         y_train = y.iloc[:n_train].reset_index(drop=True)
 
         X_cal = X.iloc[n_train:n_source].reset_index(drop=True)
         y_cal = y.iloc[n_train:n_source].reset_index(drop=True)
+
+        X_cal_fit = X.iloc[n_train : n_train + n_cal_fit].reset_index(drop=True)
+        y_cal_fit = y.iloc[n_train : n_train + n_cal_fit].reset_index(drop=True)
+
+        X_cal_ref = X.iloc[n_train + n_cal_fit : n_source].reset_index(drop=True)
+        y_cal_ref = y.iloc[n_train + n_cal_fit : n_source].reset_index(drop=True)
 
         X_deploy = X.iloc[n_source:].reset_index(drop=True)
         y_deploy = y.iloc[n_source:].reset_index(drop=True)
@@ -119,8 +137,13 @@ class OpenMLElectricityLoader:
                     "0_DOWN": int((y_deploy == 0).sum()),
                     "1_UP": int((y_deploy == 1).sum()),
                 },
-                "temporal_ordering_policy": "Strict chronological forward ordering without shuffling",
+                "temporal_ordering_policy": (
+                    "Contiguous 48-period day progression from 1996-05-07 to 1998-12-05 "
+                    "strictly ordered chronologically by row index without shuffling"
+                ),
                 "source_training_boundary": [0, n_train - 1],
+                "source_calibration_fit_boundary": [n_train, n_train + n_cal_fit - 1],
+                "source_calibration_ref_boundary": [n_train + n_cal_fit, n_source - 1],
                 "source_calibration_boundary": [n_train, n_source - 1],
                 "deployment_stream_boundary": [n_source, n_total - 1],
                 "preprocessing_configuration": "StandardScaler fitted strictly on source_training split",
@@ -135,6 +158,10 @@ class OpenMLElectricityLoader:
             "y_train": y_train,
             "X_cal": X_cal,
             "y_cal": y_cal,
+            "X_cal_fit": X_cal_fit,
+            "y_cal_fit": y_cal_fit,
+            "X_cal_ref": X_cal_ref,
+            "y_cal_ref": y_cal_ref,
             "X_deploy": X_deploy,
             "y_deploy": y_deploy,
             "feature_names": list(X.columns),

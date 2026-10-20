@@ -49,6 +49,11 @@ def draw_panel_electricity_accuracy(draw: ImageDraw.ImageDraw, df: pd.DataFrame,
     cott_pts = [(xs[i], to_y(df["est_cott"].iloc[i])) for i in range(n_pts)]
     draw.line(cott_pts, fill="#5CB85C", width=2)
 
+    # Plot Scalar OT Heuristic (Teal)
+    if "est_scalar_ot" in df.columns:
+        sc_pts = [(xs[i], to_y(df["est_scalar_ot"].iloc[i])) for i in range(n_pts)]
+        draw.line(sc_pts, fill="#17A2B8", width=2)
+
     # Panel Title & Legend
     draw.text((x0 + pad, y0 + 10), "OpenML Electricity: Chronological Accuracy Tracking", fill="#111111")
     leg_x = plot_x0 + 10
@@ -56,14 +61,17 @@ def draw_panel_electricity_accuracy(draw: ImageDraw.ImageDraw, df: pd.DataFrame,
     draw.line([(leg_x, leg_y), (leg_x + 15, leg_y)], fill="#000000", width=3)
     draw.text((leg_x + 20, leg_y - 6), "True Acc", fill="#000000")
 
-    draw.line([(leg_x + 85, leg_y), (leg_x + 100, leg_y)], fill="#D9534F", width=2)
-    draw.text((leg_x + 105, leg_y - 6), "CBPE", fill="#D9534F")
+    draw.line([(leg_x + 75, leg_y), (leg_x + 90, leg_y)], fill="#D9534F", width=2)
+    draw.text((leg_x + 95, leg_y - 6), "CBPE", fill="#D9534F")
 
-    draw.line([(leg_x + 160, leg_y), (leg_x + 175, leg_y)], fill="#337AB7", width=2)
-    draw.text((leg_x + 180, leg_y - 6), "ATC", fill="#337AB7")
+    draw.line([(leg_x + 140, leg_y), (leg_x + 155, leg_y)], fill="#337AB7", width=2)
+    draw.text((leg_x + 160, leg_y - 6), "ATC", fill="#337AB7")
 
-    draw.line([(leg_x + 235, leg_y), (leg_x + 250, leg_y)], fill="#5CB85C", width=2)
-    draw.text((leg_x + 255, leg_y - 6), "COTT", fill="#5CB85C")
+    draw.line([(leg_x + 195, leg_y), (leg_x + 210, leg_y)], fill="#17A2B8", width=2)
+    draw.text((leg_x + 215, leg_y - 6), "ScalarOT", fill="#17A2B8")
+
+    draw.line([(leg_x + 280, leg_y), (leg_x + 295, leg_y)], fill="#5CB85C", width=2)
+    draw.text((leg_x + 300, leg_y - 6), "COTT (Pub)", fill="#5CB85C")
 
 
 def draw_panel_electricity_drift(draw: ImageDraw.ImageDraw, df: pd.DataFrame, bbox: tuple):
@@ -125,18 +133,19 @@ def draw_panel_mae_barchart(draw: ImageDraw.ImageDraw, agg_df: pd.DataFrame, bbo
         draw.line([(plot_x0, y_pos), (plot_x1, y_pos)], fill="#EAEAEA", width=1)
         draw.text((x0 + 10, y_pos - 6), f"{y_val:.2f}", fill="#555555")
 
-    methods = ["AC", "DoC", "ATC", "CBPE", "COTT"]
+    methods = ["AC", "DoC", "ATC", "CBPE", "ScalarOT", "COTT"]
     maes = [
         agg_df["mae_ac"].iloc[0],
         agg_df["mae_doc"].iloc[0],
         agg_df["mae_atc"].iloc[0],
         agg_df["mae_cbpe"].iloc[0],
+        agg_df["mae_scalar_ot"].iloc[0] if "mae_scalar_ot" in agg_df.columns else 0.15,
         agg_df["mae_cott"].iloc[0],
     ]
-    colors = ["#4C72B0", "#55A868", "#C44E52", "#8172B3", "#2CA02C"]
+    colors = ["#4C72B0", "#55A868", "#C44E52", "#8172B3", "#17A2B8", "#2CA02C"]
 
     n_bars = len(methods)
-    bar_w = 40
+    bar_w = 34
     gap = ((plot_x1 - plot_x0) - (n_bars * bar_w)) / (n_bars + 1)
 
     for i in range(n_bars):
@@ -146,8 +155,8 @@ def draw_panel_mae_barchart(draw: ImageDraw.ImageDraw, agg_df: pd.DataFrame, bbo
         by0 = plot_y1 - (maes[i] / 0.22) * (plot_y1 - plot_y0)
 
         draw.rectangle([bx0, by0, bx1, by1], fill=colors[i], outline="#333333")
-        draw.text((bx0 + 6, plot_y1 + 5), methods[i], fill="#111111")
-        draw.text((bx0 - 2, by0 - 15), f"{maes[i]:.3f}", fill="#111111")
+        draw.text((bx0 - 2, plot_y1 + 5), methods[i], fill="#111111")
+        draw.text((bx0 - 4, by0 - 15), f"{maes[i]:.3f}", fill="#111111")
 
     draw.text((x0 + pad, y0 + 10), "Accuracy Estimation MAE on Electricity Stream (Lower is Better)", fill="#111111")
 

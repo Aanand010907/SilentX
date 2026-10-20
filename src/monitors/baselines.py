@@ -23,7 +23,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import ks_2samp
 from scipy.spatial.distance import jensenshannon
-from scipy.optimize import linprog
+from scipy.optimize import linprog, linear_sum_assignment
 
 
 # =====================================================================
@@ -308,119 +308,292 @@ class CBPEPerformanceEstimator:
 
 
 # =====================================================================
-# 3. CONFIDENCE OPTIMAL TRANSPORT WITH THRESHOLDING (COTT)
+# 3. PUBLISHED CONFIDENCE OPTIMAL TRANSPORT WITH THRESHOLDING (COTT)
 # =====================================================================
 
 class ConfidenceOptimalTransportEstimator:
-    """Confidence Optimal Transport with Thresholding (COTT) (Zhang et al., NeurIPS 2023).
+    """Published Confidence Optimal Transport with Thresholding (COTT) (Lu et al., NeurIPS 2023).
 
-    Solves discrete optimal transport between target predicted probability vectors
-    and source one-hot label distributions under an L_infinity cost matrix C:
-    P* = argmin_{P in Pi(mu_T, mu_S)} <P, C>
+    Official reference:
+    - Paper: "Characterizing Out-of-Distribution Error via Optimal Transport", NeurIPS 2023.
+    - arXiv: 2305.15640
+    - Official repository: https://github.com/luyuzhe111/COT (run_estimation.py)
 
-    Where:
-    - Target marginal: uniform 1/n across target instances.
-    - Source marginal: uniform 1/N across source calibration instances.
-    - C_{ij} = || e_{y_i^S} - p_j^T ||_inf
-    - Calibration cost threshold t is learned on source calibration:
-      Cost_i^S = || e_{y_i^S} - p_i^S ||_inf
-      mean( I( Cost_i^S >= t ) ) = Err(D_cal)
-    - Target error estimate:
-      epsilon_hat_COTT = sum_{i, j : C_{ij} >= t} P*_{ij}
-      Acc_hat_COTT = 1 - epsilon_hat_COTT
+    Mathematical formulation:
+    1. Preserves full probability vectors p_i in Delta^{k-1} for all samples.
+    2. Represents ground-truth labels using one-hot vectors e_y in {0, 1}^k.
+    3. Uses the L_infinity cost matrix:
+       C_{ij} = || p_i - e_{y_j} ||_inf
+    4. Calibration Phase (Source Reference Set):
+       - Solves optimal matching P*_val = argmin_{P} <P, C^val> between source validation
+         probability vectors and empirical source one-hot labels.
+       - Extracts matched costs: c_i^matched = C^val_{i, pi(i)}.
+       - Sets cost threshold t* such that the fraction of samples with c_i^matched >= t*
+         matches the observed source validation classification error Err(D_val).
+    5. Deployment Phase (Target Unlabeled Batch):
+       - Computes target probability vectors p_j^T.
+       - Solves optimal transport plan P* between target probability distribution and
+         empirical source label distribution under L_infinity cost.
+       - Estimates target error: epsilon_hat = sum_{j, i : C_{ji} >= t*} P*_{ji}.
+       - Estimates target accuracy: Acc_hat = 1 - epsilon_hat.
     """
 
     def __init__(
         self,
         cost_threshold: float,
-        cal_subsample_probs: np.ndarray,
-        cal_subsample_labels: np.ndarray,
+        source_ref_probs: np.ndarray,
+        source_ref_labels: np.ndarray,
     ):
         self.cost_threshold = float(cost_threshold)
-        self.p_cal = np.asarray(cal_subsample_probs, dtype=float)
-        self.y_cal = np.asarray(cal_subsample_labels, dtype=int)
-        self.num_classes = 2 if self.p_cal.ndim == 1 else self.p_cal.shape[1]
+        self.p_ref = np.asarray(source_ref_probs, dtype=float)
+        self.y_ref = np.asarray(source_ref_labels, dtype=int)
+        self.num_classes = self.p_ref.shape[1]
+
+    @classmethod
+    def _to_prob_matrix(cls, probs: np.ndarray) -> np.ndarray:
+        p = np.asarray(probs, dtype=float)
+        if p.ndim == 1:
+            p_mat = np.column_stack([1.0 - p, p])
+        elif p.ndim == 2:
+            p_mat = p
+        else:
+            raise ValueError(f"Expected 1D or 2D probability array, got shape {p.shape}")
+        # Normalize rows to strictly sum to 1
+        row_sums = np.sum(p_mat, axis=1, keepdims=True)
+        row_sums[row_sums == 0] = 1.0
+        return np.clip(p_mat / row_sums, 0.0, 1.0)
+
+    @classmethod
+    def _compute_linf_cost_matrix(cls, probs: np.ndarray, one_hot_labels: np.ndarray) -> np.ndarray:
+        """Compute pairwise L_infinity cost matrix between probability vectors and one-hot labels.
+
+        C_{ij} = || p_i - e_{y_j} ||_inf = max_c | p_{i, c} - (e_{y_j})_c |
+        """
+        n_p, n_classes = probs.shape
+        n_y = len(one_hot_labels)
+
+        # Broadcast diff: shape (n_p, n_y, n_classes)
+        # Using memory-efficient broadcasting for practical batch sizes
+        diff = np.abs(probs[:, None, :] - one_hot_labels[None, :, :])
+        return np.max(diff, axis=-1)
 
     @classmethod
     def fit(
         cls,
         cal_probs: np.ndarray,
         cal_labels: np.ndarray,
-        cal_acc: float,
-        max_cal_samples: int = 100,
+        cal_acc: Optional[float] = None,
+        max_cal_samples: int = 150,
         seed: int = 42,
     ) -> "ConfidenceOptimalTransportEstimator":
-        """Calibrate cost threshold t on source calibration data."""
-        p_raw = np.asarray(cal_probs, dtype=float)
-        y_raw = np.asarray(cal_labels, dtype=int)
-        n_cal = len(p_raw)
+        """Calibrate cost threshold t* on source calibration reference data.
 
-        # Convert 1D binary probabilities to 2D distributions
-        if p_raw.ndim == 1:
-            p_mat = np.column_stack([1.0 - p_raw, p_raw])
-        else:
-            p_mat = p_raw
+        Strictly follows Section 3.2 of Lu et al. (NeurIPS 2023):
+        Computes optimal transport plan P*_val on the validation set, calculates matched
+        costs, and sets t* to match the empirical validation error.
+        """
+        p_mat = cls._to_prob_matrix(cal_probs)
+        y_vec = np.asarray(cal_labels, dtype=int)
+        n_cal, num_classes = p_mat.shape
 
-        # Compute point-wise source nonconformity cost || e_{y_i} - p_i ||_inf
-        source_costs = []
-        for i in range(n_cal):
-            e_y = np.zeros(p_mat.shape[1])
-            e_y[y_raw[i]] = 1.0
-            cost_i = np.max(np.abs(e_y - p_mat[i]))
-            source_costs.append(cost_i)
+        if len(y_vec) != n_cal:
+            raise ValueError(f"Mismatch: cal_probs ({n_cal}) vs cal_labels ({len(y_vec)})")
 
-        source_costs = np.array(source_costs)
-        target_err = float(np.clip(1.0 - cal_acc, 0.0, 1.0))
-        # Quantile threshold t* such that fraction with cost >= t* matches source error
-        threshold = float(np.quantile(source_costs, 1.0 - target_err, method="higher"))
-
-        # Subsample source calibration for tractable LP solving (HiGHS solver)
+        # Subsample reference set if needed to keep matching fast and deterministic
         if n_cal > max_cal_samples:
             rng = np.random.default_rng(seed)
             sub_idx = rng.choice(n_cal, size=max_cal_samples, replace=False)
             p_sub = p_mat[sub_idx]
-            y_sub = y_raw[sub_idx]
+            y_sub = y_vec[sub_idx]
         else:
             p_sub = p_mat
-            y_sub = y_raw
+            y_sub = y_vec
+
+        n_sub = len(y_sub)
+        e_sub = np.zeros((n_sub, num_classes), dtype=float)
+        for i, y_val in enumerate(y_sub):
+            e_sub[i, y_val] = 1.0
+
+        # Construct source validation cost matrix C_val (n_sub x n_sub)
+        C_val = cls._compute_linf_cost_matrix(p_sub, e_sub)
+
+        # Solve optimal matching via Hungarian algorithm (Proposition 2.1 in Peyre & Cuturi 2019)
+        row_ind, col_ind = linear_sum_assignment(C_val)
+        matched_costs = C_val[row_ind, col_ind]
+
+        # Empirical validation error
+        preds_sub = np.argmax(p_sub, axis=1)
+        err_val = float(np.mean(preds_sub != y_sub))
+        if cal_acc is not None:
+            err_val = float(np.clip(1.0 - cal_acc, 0.0, 1.0))
+
+        # Quantile threshold t* such that fraction of samples with matched cost >= t* matches err_val
+        threshold = float(np.quantile(matched_costs, max(0.0, 1.0 - err_val), method="higher"))
 
         return cls(
             cost_threshold=threshold,
-            cal_subsample_probs=p_sub,
-            cal_subsample_labels=y_sub,
+            source_ref_probs=p_sub,
+            source_ref_labels=y_sub,
         )
 
+    def estimate_accuracy(
+        self,
+        target_probs: np.ndarray,
+        batch_size: int = 150,
+        seed: int = 42,
+    ) -> float:
+        """Estimate target accuracy using COTT optimal transport with thresholding.
+
+        Computes optimal transport plan between target predicted probabilities and
+        source reference labels, accumulating mass transported to cost >= t*.
+        """
+        p_t = self._to_prob_matrix(target_probs)
+        n_target = len(p_t)
+
+        if n_target == 0:
+            return 1.0
+
+        N = len(self.p_ref)
+        e_ref = np.zeros((N, self.num_classes), dtype=float)
+        for i, y_val in enumerate(self.y_ref):
+            e_ref[i, y_val] = 1.0
+
+        # If target size is larger than batch_size, evaluate in chunks as in paper Sec 3.2
+        if n_target > batch_size:
+            chunk_errors = []
+            n_chunks = int(np.ceil(n_target / batch_size))
+            for k in range(n_chunks):
+                start = k * batch_size
+                end = min(n_target, (k + 1) * batch_size)
+                p_chunk = p_t[start:end]
+                err_chunk = self._estimate_batch_error(p_chunk, e_ref)
+                chunk_errors.append(err_chunk * (end - start))
+            total_err = sum(chunk_errors) / n_target
+            return float(np.clip(1.0 - total_err, 0.0, 1.0))
+
+        total_err = self._estimate_batch_error(p_t, e_ref)
+        return float(np.clip(1.0 - total_err, 0.0, 1.0))
+
+    def _estimate_batch_error(self, p_target: np.ndarray, e_ref: np.ndarray) -> float:
+        """Estimate error on a single batch via optimal transport."""
+        n = len(p_target)
+        N = len(e_ref)
+
+        # C matrix of shape (n, N): row = target sample, col = source reference label
+        C = self._compute_linf_cost_matrix(p_target, e_ref)
+
+        # Case 1: Equal marginal sizes (n == N) -> exact Hungarian matching
+        if n == N:
+            row_ind, col_ind = linear_sum_assignment(C)
+            matched_costs = C[row_ind, col_ind]
+            err_est = float(np.mean(matched_costs >= self.cost_threshold))
+            return err_est
+
+        # Case 2: Unequal marginal sizes -> Kantorovich linear program via HiGHS
+        c_vec = C.ravel()  # shape (n * N,)
+
+        # Constraints:
+        # sum_j P_{ij} = 1/n (n constraints for target marginals)
+        # sum_i P_{ij} = 1/N (N constraints for source marginals)
+        A_eq = np.zeros((n + N, n * N), dtype=float)
+        b_eq = np.zeros(n + N, dtype=float)
+
+        for i in range(n):
+            A_eq[i, i * N : (i + 1) * N] = 1.0
+            b_eq[i] = 1.0 / n
+
+        for j in range(N):
+            A_eq[n + j, j::N] = 1.0
+            b_eq[n + j] = 1.0 / N
+
+        res = linprog(
+            c_vec,
+            A_eq=A_eq[:-1],
+            b_eq=b_eq[:-1],
+            bounds=(0.0, None),
+            method="highs",
+        )
+
+        if not res.success:
+            # Deterministic fallback to mean threshold violation if solver fails
+            fallback_err = float(np.mean(C >= self.cost_threshold))
+            return fallback_err
+
+        gamma_opt = res.x.reshape((n, N))
+        mask_threshold = (C >= self.cost_threshold)
+        err_est = float(np.sum(gamma_opt[mask_threshold]))
+        return err_est
+
+
+# =====================================================================
+# 4. EXPERIMENTAL SCALAR CONFIDENCE OPTIMAL TRANSPORT HEURISTIC
+# =====================================================================
+
+class ScalarConfidenceOTHeuristic:
+    """Experimental 1D Scalar Confidence Optimal Transport Heuristic.
+
+    IMPORTANT SCIENTIFIC DISTINCTION:
+    This is NOT the published COTT algorithm from Lu et al. (NeurIPS 2023).
+    It operates solely on 1D top-1 scalar confidence scores c = max_k p_k under an
+    absolute difference cost |c_i^S - c_j^T|, transporting source error indicators
+    to the target domain. Preserved under this explicit name for baseline comparison.
+    """
+
+    def __init__(
+        self,
+        source_confidences: np.ndarray,
+        source_errors: np.ndarray,
+    ):
+        self.source_conf = np.asarray(source_confidences, dtype=float).ravel()
+        self.source_errors = np.asarray(source_errors, dtype=float).ravel()
+
+    @classmethod
+    def fit(
+        cls,
+        cal_probs: np.ndarray,
+        cal_labels: np.ndarray,
+        max_samples: int = 100,
+        seed: int = 42,
+    ) -> "ScalarConfidenceOTHeuristic":
+        p = np.asarray(cal_probs, dtype=float)
+        y = np.asarray(cal_labels, dtype=int).ravel()
+        if p.ndim == 1:
+            conf = np.maximum(p, 1.0 - p)
+            preds = (p >= 0.5).astype(int)
+        else:
+            conf = np.max(p, axis=1)
+            preds = np.argmax(p, axis=1)
+
+        errors = (preds != y).astype(float)
+        n = len(conf)
+
+        if n > max_samples:
+            rng = np.random.default_rng(seed)
+            sub_idx = rng.choice(n, size=max_samples, replace=False)
+            conf = conf[sub_idx]
+            errors = errors[sub_idx]
+
+        return cls(source_confidences=conf, source_errors=errors)
+
     def estimate_accuracy(self, target_probs: np.ndarray, max_target_samples: int = 100) -> float:
-        """Solve optimal transport LP and estimate target accuracy."""
         p_t = np.asarray(target_probs, dtype=float)
         if p_t.ndim == 1:
-            p_t_mat = np.column_stack([1.0 - p_t, p_t])
+            conf_t = np.maximum(p_t, 1.0 - p_t)
         else:
-            p_t_mat = p_t
+            conf_t = np.max(p_t, axis=1)
 
-        n_target = len(p_t_mat)
-        # Subsample target batch if very large to keep LP solver fast (<0.05s)
-        if n_target > max_target_samples:
-            sub_idx = np.linspace(0, n_target - 1, max_target_samples, dtype=int)
-            p_t_mat = p_t_mat[sub_idx]
+        m = len(conf_t)
+        if m > max_target_samples:
+            sub_idx = np.linspace(0, m - 1, max_target_samples, dtype=int)
+            conf_t = conf_t[sub_idx]
 
-        N = len(self.p_cal)
-        n = len(p_t_mat)
+        N = len(self.source_conf)
+        n = len(conf_t)
 
-        # Build Cost Matrix C_{ij} = || e_{y_i^S} - p_j^T ||_inf of shape (N, n)
-        C = np.zeros((N, n), dtype=float)
-        for i in range(N):
-            e_y = np.zeros(self.num_classes)
-            e_y[self.y_cal[i]] = 1.0
-            # Broadcast across target samples
-            diff = np.abs(e_y[None, :] - p_t_mat)  # shape (n, num_classes)
-            C[i, :] = np.max(diff, axis=1)
+        # 1D cost: |c_i^S - c_j^T|
+        C = np.abs(self.source_conf[:, None] - conf_t[None, :])
+        c_vec = C.ravel()
 
-        c_vec = C.ravel()  # Length N * n
-
-        # Constraint matrices for marginals:
-        # sum_j gamma_{ij} = 1/N (N constraints)
-        # sum_i gamma_{ij} = 1/n (n constraints)
         A_eq = np.zeros((N + n, N * n), dtype=float)
         b_eq = np.zeros(N + n, dtype=float)
 
@@ -432,7 +605,6 @@ class ConfidenceOptimalTransportEstimator:
             A_eq[N + j, j::n] = 1.0
             b_eq[N + j] = 1.0 / n
 
-        # Drop one redundant constraint to ensure full row rank
         res = linprog(
             c_vec,
             A_eq=A_eq[:-1],
@@ -442,14 +614,10 @@ class ConfidenceOptimalTransportEstimator:
         )
 
         if not res.success:
-            # Fallback to mean thresholding if LP solver encounters numerical issue
-            fallback_err = np.mean(C >= self.cost_threshold)
-            return float(np.clip(1.0 - fallback_err, 0.0, 1.0))
+            return float(1.0 - np.mean(self.source_errors))
 
         gamma_opt = res.x.reshape((N, n))
+        # Weight source errors by transported target mass
+        target_error = float(np.sum(gamma_opt * self.source_errors[:, None]))
+        return float(np.clip(1.0 - target_error, 0.0, 1.0))
 
-        # COTT estimated error: mass transported to cost >= threshold
-        mask_threshold = (C >= self.cost_threshold)
-        est_error = float(np.sum(gamma_opt[mask_threshold]))
-
-        return float(np.clip(1.0 - est_error, 0.0, 1.0))

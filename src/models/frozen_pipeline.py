@@ -134,6 +134,8 @@ def train_and_freeze_pipeline(
     X_cal: pd.DataFrame,
     y_cal: pd.Series,
     feature_names: List[str],
+    X_cal_ref: Optional[pd.DataFrame] = None,
+    y_cal_ref: Optional[pd.Series] = None,
     tree_family: str = "xgboost",
     seed: int = 42,
 ) -> FrozenModelPipeline:
@@ -142,15 +144,34 @@ def train_and_freeze_pipeline(
     Enforces that:
     1. Preprocessor is fitted solely on X_train.
     2. Primary, secondary, and diagnostic models are fitted on X_train.
-    3. Calibrator, conformal quantiles, SHAP weights, and D3M threshold are fitted on X_cal.
+    3. Probability calibrator is fitted on X_cal_fit.
+    4. Reference metrics (calibration accuracy, ATC threshold, DoC offset, Mondrian quantiles,
+       TreeSHAP weights, D3M disagreement, and GdScore) are evaluated on held-out X_cal_ref
+       to eliminate in-sample evaluation and prevent calibration overfitting.
     """
     # 1. Fit frozen preprocessor on source training data only
     preprocessor = FrozenPreprocessor().fit(X_train)
     X_train_norm = preprocessor.transform(X_train)
-    X_cal_norm = preprocessor.transform(X_cal)
+
+    # Establish separated calibration-fit and calibration-ref partitions
+    if X_cal_ref is not None and y_cal_ref is not None:
+        X_cal_fit_df = X_cal
+        y_cal_fit_np = y_cal.to_numpy(dtype=int)
+        X_cal_ref_df = X_cal_ref
+        y_cal_ref_np = y_cal_ref.to_numpy(dtype=int)
+    else:
+        # Default: cleanly split source calibration 50/50
+        n_c = len(X_cal)
+        half = n_c // 2
+        X_cal_fit_df = X_cal.iloc[:half].reset_index(drop=True)
+        y_cal_fit_np = y_cal.iloc[:half].to_numpy(dtype=int)
+        X_cal_ref_df = X_cal.iloc[half:].reset_index(drop=True)
+        y_cal_ref_np = y_cal.iloc[half:].to_numpy(dtype=int)
+
+    X_cal_fit_norm = preprocessor.transform(X_cal_fit_df)
+    X_cal_ref_norm = preprocessor.transform(X_cal_ref_df)
 
     y_train_np = y_train.to_numpy(dtype=int)
-    y_cal_np = y_cal.to_numpy(dtype=int)
 
     # 2. Train Primary Classifier
     if tree_family == "xgboost":
@@ -199,29 +220,31 @@ def train_and_freeze_pipeline(
     diagnostic_logreg = LogisticRegression(C=1.0, max_iter=500, random_state=seed)
     diagnostic_logreg.fit(X_train_norm, y_train_np)
 
-    # 5. Fit Source Probability Calibrator on X_cal
-    cal_raw_probs = primary_tree.predict_proba(X_cal_norm)[:, 1]
+    # 5. Fit Source Probability Calibrator strictly on X_cal_fit
+    cal_fit_raw_probs = primary_tree.predict_proba(X_cal_fit_norm)[:, 1]
     source_calibrator = SourceProbabilityCalibrator(n_bins=10, n_cv_splits=3, random_state=seed)
-    source_calibrator.fit(cal_raw_probs, y_cal_np)
+    source_calibrator.fit(cal_fit_raw_probs, y_cal_fit_np)
 
-    cal_probs = source_calibrator.predict_proba(cal_raw_probs)
-    cal_preds = (cal_probs >= 0.5).astype(int)
-    cal_conf = np.maximum(cal_probs, 1.0 - cal_probs)
-    cal_acc = float(np.mean(cal_preds == y_cal_np))
-    cal_mean_conf = float(np.mean(cal_conf))
+    # 6. Evaluate out-of-fold calibration metrics strictly on held-out X_cal_ref
+    cal_ref_raw_probs = primary_tree.predict_proba(X_cal_ref_norm)[:, 1]
+    cal_ref_probs = source_calibrator.predict_proba(cal_ref_raw_probs)
+    cal_ref_preds = (cal_ref_probs >= 0.5).astype(int)
+    cal_ref_conf = np.maximum(cal_ref_probs, 1.0 - cal_ref_probs)
+    cal_acc = float(np.mean(cal_ref_preds == y_cal_ref_np))
+    cal_mean_conf = float(np.mean(cal_ref_conf))
 
-    # 6. Compute ATC Threshold & DoC Offset
-    atc_threshold = float(np.quantile(cal_conf, max(0.0, 1.0 - cal_acc)))
+    # 7. Compute ATC Threshold & DoC Offset on held-out reference
+    atc_threshold = float(np.quantile(cal_ref_conf, max(0.0, 1.0 - cal_acc), method="higher"))
     doc_offset = float(cal_mean_conf - cal_acc)
 
-    # 7. Lock Mondrian Conformal Quantiles (alpha = 0.10)
+    # 8. Lock Mondrian Conformal Quantiles (alpha = 0.10) on held-out reference
     conformal_calibrator = MondrianConformalCalibrator(alpha=0.10)
-    conformal_calibrator.fit(cal_probs, y_cal_np)
+    conformal_calibrator.fit(cal_ref_probs, y_cal_ref_np)
 
-    # 8. Compute TreeSHAP Feature Reliance Weights on X_cal
+    # 9. Compute TreeSHAP Feature Reliance Weights on X_cal_ref
     try:
         explainer = shap.TreeExplainer(primary_tree)
-        shap_vals = explainer.shap_values(X_cal_norm)
+        shap_vals = explainer.shap_values(X_cal_ref_norm)
         if isinstance(shap_vals, list):
             shap_vals = shap_vals[1]
         shap_reliance = np.mean(np.abs(shap_vals), axis=0)
@@ -231,10 +254,10 @@ def train_and_freeze_pipeline(
         shap_weights = getattr(primary_tree, "feature_importances_", np.ones(n_features) / n_features)
         shap_weights = shap_weights / np.sum(shap_weights)
 
-    # 9. Compute Source Correlation Matrix on X_cal
-    source_corr_matrix = np.corrcoef(X_cal_norm, rowvar=False)
+    # 10. Compute Source Correlation Matrix on X_cal_ref
+    source_corr_matrix = np.corrcoef(X_cal_ref_norm, rowvar=False)
 
-    # 10. Fit D3M Bootstrap Reference Disagreement Distribution
+    # 11. Fit D3M Bootstrap Reference Disagreement Distribution on X_cal_ref
     d3m_calibrator = D3MReferenceCalibrator(
         query_sizes=[10, 20, 50],
         num_bootstrap_rounds=100,
@@ -243,12 +266,12 @@ def train_and_freeze_pipeline(
         alpha=0.05,
         seed=seed,
     )
-    d3m_calibrator.fit(secondary_mlp, X_cal_norm)
+    d3m_calibrator.fit(secondary_mlp, X_cal_ref_norm)
 
-    # 11. Compute Calibration Set GdScore Baseline
+    # 12. Compute Calibration Set GdScore Baseline on X_cal_ref
     secondary_mlp.eval()
     with torch.no_grad():
-        h_cal, mu_cal, _ = secondary_mlp(torch.tensor(X_cal_norm, dtype=torch.float32))
+        h_cal, mu_cal, _ = secondary_mlp(torch.tensor(X_cal_ref_norm, dtype=torch.float32))
         cal_mlp_probs = torch.softmax(mu_cal, dim=-1)[:, 1].cpu().numpy()
         h_cal_np = h_cal.cpu().numpy()
         pseudo_cal = (cal_mlp_probs >= 0.5).astype(float)

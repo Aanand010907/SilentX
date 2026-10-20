@@ -9,6 +9,7 @@ from src.monitors.baselines import (
     AverageThresholdedConfidenceEstimator,
     CBPEPerformanceEstimator,
     ConfidenceOptimalTransportEstimator,
+    ScalarConfidenceOTHeuristic,
 )
 from src.monitors.trustguard import (
     AttributionWeightedDriftMonitor,
@@ -25,6 +26,7 @@ __all__ = [
     "AverageThresholdedConfidenceEstimator",
     "CBPEPerformanceEstimator",
     "ConfidenceOptimalTransportEstimator",
+    "ScalarConfidenceOTHeuristic",
     "AttributionWeightedDriftMonitor",
     "CrossArchitectureDisagreementMonitor",
     "TrustGuardCompositeMonitor",

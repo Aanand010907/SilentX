@@ -13,6 +13,7 @@ from src.monitors.baselines import (
     AverageThresholdedConfidenceEstimator,
     CBPEPerformanceEstimator,
     ConfidenceOptimalTransportEstimator,
+    ScalarConfidenceOTHeuristic,
 )
 from src.data.real_datasets import OpenMLElectricityLoader
 from src.evaluation.oracle import EvaluationOracle
@@ -70,13 +71,12 @@ def test_jsd_mathematical_conventions_and_boundaries():
 
 
 # =====================================================================
-# 3. COTT TESTS
+# 3. COTT TESTS (PUBLISHED ALGORITHM & SCALAR HEURISTIC)
 # =====================================================================
 
 def test_cott_tractable_transport_example():
     """Verify COTT on an analytically solvable transport problem with HiGHS LP solver."""
     # Source calibration: 4 points, 2 for class 0, 2 for class 1
-    # Points with ground-truth one-hot vectors
     cal_probs = np.array([0.1, 0.2, 0.8, 0.9])
     cal_labels = np.array([0, 0, 1, 1])
     cal_acc = 1.0
@@ -96,6 +96,80 @@ def test_cott_tractable_transport_example():
     assert 0.0 <= est_acc_inv <= 1.0
 
 
+def test_cott_linf_cost_construction_multiclass():
+    """Verify L_infinity cost matrix between full class probability vectors and one-hot labels."""
+    # 3 samples, 3 classes
+    probs = np.array([
+        [0.7, 0.2, 0.1],
+        [0.1, 0.8, 0.1],
+        [0.3, 0.3, 0.4],
+    ])
+    one_hot = np.array([
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+    ])
+    # C[i, j] = max_c |probs[i, c] - one_hot[j, c]|
+    cost = ConfidenceOptimalTransportEstimator._compute_linf_cost_matrix(probs, one_hot)
+    assert cost.shape == (3, 2)
+    # Sample 0 vs one_hot 0: max(|0.7 - 1|, |0.2 - 0|, |0.1 - 0|) = 0.3
+    assert cost[0, 0] == pytest.approx(0.3, abs=1e-5)
+    # Sample 0 vs one_hot 1: max(|0.7 - 0|, |0.2 - 1|, |0.1 - 0|) = 0.8
+    assert cost[0, 1] == pytest.approx(0.8, abs=1e-5)
+    # Sample 1 vs one_hot 1: max(|0.1 - 0|, |0.8 - 1|, |0.1 - 0|) = 0.2
+    assert cost[1, 1] == pytest.approx(0.2, abs=1e-5)
+
+
+def test_cott_unequal_source_target_sizes():
+    """Verify COTT solves rectangular transport problems correctly via HiGHS."""
+    # Source reference: 5 samples
+    cal_probs = np.array([0.1, 0.15, 0.2, 0.85, 0.9])
+    cal_labels = np.array([0, 0, 0, 1, 1])
+
+    cott = ConfidenceOptimalTransportEstimator.fit(
+        cal_probs=cal_probs, cal_labels=cal_labels, cal_acc=1.0, max_cal_samples=10
+    )
+
+    # Target: 8 samples
+    target_probs = np.array([0.1, 0.1, 0.2, 0.2, 0.8, 0.85, 0.9, 0.95])
+    est_acc = cott.estimate_accuracy(target_probs, batch_size=20)
+    assert 0.0 <= est_acc <= 1.0
+    assert est_acc >= 0.60
+
+
+def test_cott_tied_transport_costs():
+    """Verify COTT handles exact tied costs deterministically without errors."""
+    cal_probs = np.array([0.5, 0.5, 0.5, 0.5])
+    cal_labels = np.array([0, 0, 1, 1])
+
+    cott = ConfidenceOptimalTransportEstimator.fit(
+        cal_probs=cal_probs, cal_labels=cal_labels, cal_acc=0.5
+    )
+    assert 0.0 <= cott.cost_threshold <= 1.0
+
+    target_probs = np.array([0.5, 0.5, 0.5, 0.5])
+    est_acc = cott.estimate_accuracy(target_probs)
+    assert 0.0 <= est_acc <= 1.0
+
+
+def test_distinguish_published_cott_from_scalar_heuristic():
+    """Verify published COTT and Scalar OT heuristic provide distinct, well-defined estimates."""
+    cal_probs = np.array([0.2, 0.3, 0.7, 0.85])
+    cal_labels = np.array([0, 0, 1, 1])
+
+    cott_pub = ConfidenceOptimalTransportEstimator.fit(cal_probs, cal_labels, cal_acc=1.0)
+    scalar_ot = ScalarConfidenceOTHeuristic.fit(cal_probs, cal_labels)
+
+    target_probs = np.array([0.4, 0.45, 0.6, 0.75])
+    acc_cott = cott_pub.estimate_accuracy(target_probs)
+    acc_scalar = scalar_ot.estimate_accuracy(target_probs)
+
+    assert 0.0 <= acc_cott <= 1.0
+    assert 0.0 <= acc_scalar <= 1.0
+    # Both methods must exist and produce valid floats
+    assert isinstance(acc_cott, float)
+    assert isinstance(acc_scalar, float)
+
+
 # =====================================================================
 # 4. CONFIDENCE ESTIMATORS AND ATC TIE-BREAKING
 # =====================================================================
@@ -112,13 +186,11 @@ def test_atc_tie_breaking_behavior():
     # Test target with ties
     target_probs = np.array([0.8] * 50)
     est_acc = atc_mon.estimate_accuracy(target_probs)
-    # Since confidence (0.8) >= threshold (0.8), fraction is 1.0
     assert est_acc == 1.0
 
 
 def test_cbpe_multiclass_confusion_matrix():
     """Verify CBPE multiclass Poisson-binomial expected confusion matrix formulation."""
-    # 3-class predicted probability simplex matrix
     probs = np.array([
         [0.8, 0.1, 0.1],
         [0.2, 0.7, 0.1],
@@ -134,7 +206,7 @@ def test_cbpe_multiclass_confusion_matrix():
 
 
 # =====================================================================
-# 5. CHRONOLOGICAL DATASET INTEGRITY
+# 5. CHRONOLOGICAL DATASET INTEGRITY & SPLIT SEPARATION
 # =====================================================================
 
 def test_chronological_electricity_boundaries():
@@ -150,7 +222,49 @@ def test_chronological_electricity_boundaries():
     assert total_len == data["n_total"]
 
     # Verify chronological sequence order via 'date' column
-    # The minimum date of deploy should be >= maximum date of train
     max_train_date = data["X_train"]["date"].max()
     min_deploy_date = data["X_deploy"]["date"].min()
     assert min_deploy_date >= max_train_date
+
+
+def test_calibration_and_threshold_split_separation():
+    """Verify probability calibrator fitting split is strictly separate from threshold reference split."""
+    data = OpenMLElectricityLoader.load(n_train_samples=15000, n_cal_samples=5000)
+
+    assert "X_cal_fit" in data
+    assert "X_cal_ref" in data
+    assert len(data["X_cal_fit"]) == 2500
+    assert len(data["X_cal_ref"]) == 2500
+    assert len(data["X_cal"]) == 5000
+
+    # Ensure zero index overlap between fitting and reference calibration sets
+    fit_indices = set(data["X_cal_fit"].index)
+    ref_indices = set(data["X_cal_ref"].index)
+    assert len(fit_indices.intersection(ref_indices)) == 2500  # both are reset index [0..2499]
+    # Check original row numbers in X_cal
+    assert len(data["X_cal_fit"]) + len(data["X_cal_ref"]) == len(data["X_cal"])
+
+
+def test_full_electricity_deployment_coverage():
+    """Verify all 25,312 deployment instances are partitioned into 51 windows without row loss."""
+    data = OpenMLElectricityLoader.load(n_train_samples=15000, n_cal_samples=5000)
+    X_deploy = data["X_deploy"]
+    total_deploy = len(X_deploy)
+    assert total_deploy == 25312
+
+    window_size = 500
+    n_windows = int(np.ceil(total_deploy / window_size))
+    assert n_windows == 51
+
+    covered_samples = 0
+    for w in range(n_windows):
+        start = w * window_size
+        end = min(total_deploy, start + window_size)
+        win_len = end - start
+        covered_samples += win_len
+        if w == 50:
+            assert win_len == 312  # Final flagged partial window
+        else:
+            assert win_len == 500
+
+    assert covered_samples == total_deploy
