@@ -1,0 +1,56 @@
+experiment:
+  name: "SilentX_Stage1_Calibration"
+  random_seeds: [42, 123, 999]
+  source_train_ratio: 0.75
+  source_cal_ratio: 0.25
+
+models:
+  primary:
+    family: "xgboost"  # Options: "xgboost", "hist_gradient_boosting"
+    n_estimators: 100
+    max_depth: 4
+    learning_rate: 0.08
+  secondary:
+    family: "mlp"
+    hidden_dims: [64, 32]
+    dropout_rate: 0.2
+    batch_norm: true
+    learning_rate: 0.005
+    epochs: 40
+    batch_size: 64
+  diagnostic:
+    family: "logistic_regression"
+    c_penalty: 1.0
+    max_iter: 500
+  vbll:
+    feature_dim: 32
+    num_classes: 2
+    prior_var: 1.0
+    learning_rate: 0.01
+    epochs: 30
+
+calibration:
+  ece_bins: 10
+  isotonic_cv_folds: 3
+  conformal_alpha: 0.10
+  d3m:
+    query_sizes: [10, 20, 50]
+    posterior_samples: 25
+    temperature: 1.0
+    alpha: 0.05
+    num_bootstrap_rounds: 100
+
+data:
+  synthetic:
+    n_samples: 5000
+    n_features: 10
+  electricity:
+    dataset_id: 151
+    sample_size: 5000
+  cic_ids:
+    dev_sample_per_domain: 10000
+
+evaluation:
+  degradation_threshold: 0.05
+  benign_margin: 0.02
+  bootstrap_rounds: 1000
