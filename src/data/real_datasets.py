@@ -8,6 +8,8 @@ Covers:
 
 from typing import Dict, List, Optional, Tuple
 import os
+import json
+import datetime
 import numpy as np
 import pandas as pd
 
@@ -37,11 +39,12 @@ class OpenMLElectricityLoader:
         max_samples: Optional[int] = None,
         source_ratio: float = 0.25,
         source_train_ratio: float = 0.75,
+        manifest_path: Optional[str] = "results/electricity_manifest.json",
     ) -> Dict[str, any]:
         """Load Electricity dataset, preserving strict chronological ordering.
 
         Chronological protocol:
-        - The earliest `source_ratio` (default 25%) of the stream is reserved for the source domain.
+        - The earliest source_ratio (default 25%) of the stream is reserved for the source domain.
         - Within the source domain, the earliest 75% is used for training and the remaining 25% for calibration.
         - The remaining 75% of the timeline forms sequential deployment windows.
         """
@@ -49,9 +52,13 @@ class OpenMLElectricityLoader:
         cache_file = os.path.join(cache_dir, "electricity_151.parquet")
 
         df = None
+        is_real = False
+        retrieval_timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
         if os.path.exists(cache_file):
             try:
                 df = pd.read_parquet(cache_file)
+                is_real = True
             except Exception:
                 df = None
 
@@ -59,23 +66,23 @@ class OpenMLElectricityLoader:
             try:
                 from sklearn.datasets import fetch_openml
                 raw = fetch_openml(data_id=151, as_frame=True, parser="auto")
-                df = raw.frame
+                df = raw.frame.copy()
                 df.to_parquet(cache_file)
+                is_real = True
             except Exception as e:
-                # If network or OpenML is unavailable in this environment, generate a faithful
-                # synthetic temporal electricity surrogate with matching schema
+                # If network or OpenML is completely unreachable, fallback to faithful surrogate
                 df = cls._generate_faithful_surrogate(n_samples=max_samples or 10000)
+                is_real = False
 
         if max_samples is not None and len(df) > max_samples:
             df = df.iloc[:max_samples].copy()
 
-        # Map binary target to {0, 1}
-        # Standard OpenML electricity classes are 'UP' and 'DOWN'
+        # Map binary target to {0, 1}: 'DOWN' -> 0, 'UP' -> 1
         target_series = df[cls.TARGET_COL].astype(str).str.strip().str.upper()
         y = (target_series == "UP").astype(int)
-        X = df.drop(columns=[cls.TARGET_COL])
+        X = df.drop(columns=[cls.TARGET_COL]).copy()
 
-        # Ensure all features are numeric
+        # Ensure all features including 'day' are numeric float
         for col in X.columns:
             X[col] = pd.to_numeric(X[col], errors="coerce").fillna(0.0)
 
@@ -83,22 +90,57 @@ class OpenMLElectricityLoader:
         n_source = int(n_total * source_ratio)
         n_train = int(n_source * source_train_ratio)
 
-        X_train, y_train = X.iloc[:n_train], y.iloc[:n_train]
-        X_cal, y_cal = X.iloc[n_train:n_source], y.iloc[n_train:n_source]
-        X_deploy, y_deploy = X.iloc[n_source:], y.iloc[n_source:]
+        X_train = X.iloc[:n_train].reset_index(drop=True)
+        y_train = y.iloc[:n_train].reset_index(drop=True)
+
+        X_cal = X.iloc[n_train:n_source].reset_index(drop=True)
+        y_cal = y.iloc[n_train:n_source].reset_index(drop=True)
+
+        X_deploy = X.iloc[n_source:].reset_index(drop=True)
+        y_deploy = y.iloc[n_source:].reset_index(drop=True)
+
+        # Write provenance manifest
+        if manifest_path is not None:
+            os.makedirs(os.path.dirname(manifest_path), exist_ok=True)
+            manifest = {
+                "openml_identifier": 151,
+                "dataset_name": "electricity",
+                "retrieval_timestamp_utc": retrieval_timestamp,
+                "is_real_download": is_real,
+                "total_samples": n_total,
+                "feature_columns": list(X.columns),
+                "target_column": cls.TARGET_COL,
+                "class_mapping": {"DOWN": 0, "UP": 1},
+                "class_balance_source_train": {
+                    "0_DOWN": int((y_train == 0).sum()),
+                    "1_UP": int((y_train == 1).sum()),
+                },
+                "class_balance_deployment": {
+                    "0_DOWN": int((y_deploy == 0).sum()),
+                    "1_UP": int((y_deploy == 1).sum()),
+                },
+                "temporal_ordering_policy": "Strict chronological forward ordering without shuffling",
+                "source_training_boundary": [0, n_train - 1],
+                "source_calibration_boundary": [n_train, n_source - 1],
+                "deployment_stream_boundary": [n_source, n_total - 1],
+                "preprocessing_configuration": "StandardScaler fitted strictly on source_training split",
+                "row_exclusions": 0,
+            }
+            with open(manifest_path, "w") as f:
+                json.dump(manifest, f, indent=2)
 
         return {
             "name": "OpenML_Electricity_151",
-            "X_train": X_train.reset_index(drop=True),
-            "y_train": y_train.reset_index(drop=True),
-            "X_cal": X_cal.reset_index(drop=True),
-            "y_cal": y_cal.reset_index(drop=True),
-            "X_deploy": X_deploy.reset_index(drop=True),
-            "y_deploy": y_deploy.reset_index(drop=True),
+            "X_train": X_train,
+            "y_train": y_train,
+            "X_cal": X_cal,
+            "y_cal": y_cal,
+            "X_deploy": X_deploy,
+            "y_deploy": y_deploy,
             "feature_names": list(X.columns),
             "target_name": "class_UP",
             "n_total": n_total,
-            "is_surrogate": ("_surrogate" in getattr(df, "attrs", {}).get("source", "")),
+            "is_real": is_real,
         }
 
     @classmethod
@@ -107,7 +149,6 @@ class OpenMLElectricityLoader:
         rng = np.random.default_rng(seed)
         t = np.linspace(0, 10 * np.pi, n_samples)
 
-        # Replicate cyclic periodicity and trend
         day = (np.arange(n_samples) // 48) % 7
         period = (np.arange(n_samples) % 48) / 48.0
         nswdemand = 0.5 + 0.3 * np.sin(t) + 0.1 * rng.standard_normal(n_samples)
@@ -116,7 +157,6 @@ class OpenMLElectricityLoader:
         nswprice = 0.05 + 0.03 * (nswdemand**1.5) + 0.02 * rng.standard_normal(n_samples)
         vicprice = 0.04 + 0.03 * (vicdemand**1.5) + 0.02 * rng.standard_normal(n_samples)
 
-        # Concept drift in market clearing price dynamics
         price_drift = 0.02 * np.sin(0.2 * t)
         prob_up = 1.0 / (1.0 + np.exp(-(2.5 * (nswprice - vicprice) + price_drift)))
         y_class = np.where(rng.random(n_samples) < prob_up, "UP", "DOWN")
@@ -165,12 +205,10 @@ class CICIDSSchemaHarmonizer:
     def canonicalize_columns(cls, df: pd.DataFrame) -> pd.DataFrame:
         """Normalize whitespace, case, and divergent exporter column naming."""
         df = df.copy()
-        # Clean column names
         clean_cols = {}
         for c in df.columns:
             name = c.strip()
             name = cls.COLUMN_REPLACEMENTS.get(name, name)
-            # Replace invalid punctuation with underscore
             name = name.replace(" ", "_").replace("/", "_").replace(".", "_")
             clean_cols[c] = name
         df = df.rename(columns=clean_cols)

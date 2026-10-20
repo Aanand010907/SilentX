@@ -151,7 +151,9 @@ def run_stage1_pipeline(config_path: str = "configs/experiment.yaml"):
         })
 
     # 5. Aggregate Oracle Evaluation Metrics
-    stream_summary = oracle.evaluate_stream(window_results, risk_alarm_threshold=0.45)
+    stream_summary = oracle.evaluate_stream(
+        window_results, risk_alarm_threshold=trustguard_monitor.alarm_threshold
+    )
     audit_df = pd.DataFrame(monitor_audit_records)
 
     # 6. Save Artifacts to results/

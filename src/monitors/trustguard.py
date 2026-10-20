@@ -96,18 +96,33 @@ class CrossArchitectureDisagreementMonitor:
 
 
 class TrustGuardCompositeMonitor:
-    """The central TrustGuard multi-signal monitoring engine."""
+    """The central TrustGuard multi-signal monitoring engine.
+
+    Computes normalized excess signals relative to source calibration baseline:
+    tilde{S}_k(W_t) = max(0, S_k(W_t) - S_k(D_cal))
+
+    Combines:
+    1. Attribution-Weighted L3 Input & Correlation Drift (S_attr)
+    2. Cross-Architecture Inductive Disagreement (S_dis)
+    3. Mondrian Conformal Instability / Abstention Rate (S_conf)
+    4. Classification-Layer Pseudo-Label Gradient Norm (S_grad)
+    5. Variational Bayesian Last Layer Disagreement (S_d3m)
+    """
 
     def __init__(
         self,
         frozen_pipeline: FrozenModelPipeline,
         X_cal: pd.DataFrame,
-        w_dis: float = 0.35,
-        w_attr: float = 0.25,
-        w_conf: float = 0.20,
-        w_grad: float = 0.20,
+        w_dis: float = 0.25,
+        w_attr: float = 0.30,
+        w_conf: float = 0.15,
+        w_grad: float = 0.15,
+        w_d3m: float = 0.15,
+        alpha_alarm: float = 0.05,
+        seed: int = 42,
     ):
         self.pipeline = frozen_pipeline
+        self.X_cal = X_cal
         self.attr_monitor = AttributionWeightedDriftMonitor(
             X_cal=X_cal,
             shap_weights=frozen_pipeline.shap_weights,
@@ -115,44 +130,90 @@ class TrustGuardCompositeMonitor:
         )
         self.cross_arch_monitor = CrossArchitectureDisagreementMonitor()
 
-        self.w_dis = float(w_dis)
-        self.w_attr = float(w_attr)
-        self.w_conf = float(w_conf)
-        self.w_grad = float(w_grad)
+        # Weight normalization
+        total_w = w_dis + w_attr + w_conf + w_grad + w_d3m
+        self.w_dis = float(w_dis / total_w)
+        self.w_attr = float(w_attr / total_w)
+        self.w_conf = float(w_conf / total_w)
+        self.w_grad = float(w_grad / total_w)
+        self.w_d3m = float(w_d3m / total_w)
+        self.alpha_alarm = float(alpha_alarm)
+        self.seed = seed
 
-    def evaluate_window(self, X_unlabeled: pd.DataFrame) -> Dict[str, any]:
-        """Compute all TrustGuard signals and composite risk score on an unlabeled window.
+        # Calibrate baseline signal levels on source calibration data
+        self._calibrate_baselines(X_cal)
 
-        Note: Strictly does not take or access ground-truth labels.
-        """
-        # 1. Primary and secondary model predictions
+    def _calibrate_baselines(self, X_cal: pd.DataFrame) -> None:
+        """Lock in-distribution baseline signal levels and the 95th-percentile alarm threshold."""
+        # 1. Baseline Attribution Drift on cal
+        attr_cal = self.attr_monitor.evaluate_window(X_cal)
+        self.base_s_attr = float(attr_cal["s_attr"])
+
+        # 2. Baseline Cross-Arch Disagreement on cal
+        probs_tree_cal = self.pipeline.predict_primary_proba(X_cal)
+        probs_mlp_cal = self.pipeline.predict_secondary_proba(X_cal)
+        dis_cal = self.cross_arch_monitor.evaluate_window(probs_tree_cal, probs_mlp_cal)
+        self.base_s_dis = float(dis_cal["s_dis"])
+
+        # 3. Baseline Conformal Abstention on cal
+        conf_cal = self.pipeline.conformal_calibrator.compute_cardinality_metrics(probs_tree_cal)
+        self.base_s_conf = float(conf_cal["abstention_rate"])
+
+        # 4. Baseline GdScore on cal
+        self.base_s_grad = float(self.pipeline.source_cal_gdscore)
+
+        # 5. Bootstrap calibrate risk threshold on source calibration sub-batches
+        rng = np.random.default_rng(self.seed)
+        n_cal = len(X_cal)
+        batch_size = min(250, n_cal // 2)
+        boot_risks = []
+
+        for _ in range(50):
+            idx = rng.choice(n_cal, size=batch_size, replace=True)
+            X_sub = X_cal.iloc[idx].reset_index(drop=True)
+            r = self._compute_raw_signals(X_sub)
+            boot_risks.append(r["risk_tg"])
+
+        # Lock (1 - alpha) source alarm threshold (e.g., 95th percentile)
+        self.alarm_threshold = float(np.quantile(boot_risks, 1.0 - self.alpha_alarm))
+
+    def _compute_raw_signals(self, X_unlabeled: pd.DataFrame) -> Dict[str, any]:
         probs_primary = self.pipeline.predict_primary_proba(X_unlabeled)
         probs_mlp = self.pipeline.predict_secondary_proba(X_unlabeled)
 
-        # Signal 1: Attribution-Weighted Drift
+        # Signal 1: Attribution drift
         attr_out = self.attr_monitor.evaluate_window(X_unlabeled)
         s_attr = attr_out["s_attr"]
+        excess_s_attr = float(max(0.0, s_attr - self.base_s_attr))
 
         # Signal 2: Cross-Architecture Disagreement
         dis_out = self.cross_arch_monitor.evaluate_window(probs_primary, probs_mlp)
         s_dis = dis_out["s_dis"]
+        excess_s_dis = float(max(0.0, s_dis - self.base_s_dis))
 
-        # Signal 3: Mondrian Conformal Ambiguity
+        # Signal 3: Conformal Ambiguity
         conf_metrics = self.pipeline.conformal_calibrator.compute_cardinality_metrics(probs_primary)
         s_conf = conf_metrics["abstention_rate"]
+        excess_s_conf = float(max(0.0, s_conf - self.base_s_conf))
 
-        # Signal 4: GdScore (Classification-Layer Gradient Norm)
+        # Signal 4: GdScore
         gdscore_val = self.pipeline.compute_gdscore(X_unlabeled)
-        # Normalized excess above source calibration baseline
-        s_grad = float(np.clip(
-            (gdscore_val - self.pipeline.source_cal_gdscore) / max(0.01, self.pipeline.source_cal_gdscore),
-            0.0,
-            1.0,
-        ))
+        excess_s_grad = float(max(0.0, (gdscore_val - self.base_s_grad) / max(0.01, self.base_s_grad)))
 
-        # Composite TrustGuard Risk Index
+        # Signal 5: D3M Posterior Disagreement
+        X_norm = self.pipeline.preprocessor.transform(X_unlabeled)
+        d3m_out = self.pipeline.d3m_calibrator.evaluate_batch(self.pipeline.secondary_mlp, X_norm)
+        s_d3m = float(d3m_out["disagreement_rate"])
+        d3m_thresh = float(d3m_out["threshold_95"])
+        excess_s_d3m = float(max(0.0, s_d3m - d3m_thresh))
+
+        # Composite TrustGuard Risk Score
         risk_tg = float(np.clip(
-            self.w_dis * s_dis + self.w_attr * s_attr + self.w_conf * s_conf + self.w_grad * s_grad,
+            self.w_dis * excess_s_dis
+            + self.w_attr * excess_s_attr
+            + self.w_conf * excess_s_conf
+            + self.w_grad * excess_s_grad
+            + self.w_d3m * excess_s_d3m,
             0.0,
             1.0,
         ))
@@ -160,11 +221,24 @@ class TrustGuardCompositeMonitor:
         return {
             "risk_tg": risk_tg,
             "s_dis": s_dis,
+            "excess_s_dis": excess_s_dis,
             "s_attr": s_attr,
+            "excess_s_attr": excess_s_attr,
             "s_conf": s_conf,
-            "s_grad": s_grad,
+            "excess_s_conf": excess_s_conf,
+            "s_grad": excess_s_grad,
             "gdscore_raw": gdscore_val,
+            "s_d3m": s_d3m,
+            "excess_s_d3m": excess_s_d3m,
+            "d3m_is_alert": d3m_out["is_alert"],
             "probs_primary": probs_primary,
             "probs_mlp": probs_mlp,
             "conformal_metrics": conf_metrics,
         }
+
+    def evaluate_window(self, X_unlabeled: pd.DataFrame) -> Dict[str, any]:
+        """Compute all TrustGuard signals and composite risk score on an unlabeled window."""
+        res = self._compute_raw_signals(X_unlabeled)
+        res["alarm_threshold"] = self.alarm_threshold
+        res["is_alarm"] = bool(res["risk_tg"] >= self.alarm_threshold)
+        return res

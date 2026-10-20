@@ -1,12 +1,14 @@
-"""Monitoring engines and baseline estimators for SilentX."""
+"""Monitoring engines, baseline estimators, and optimal transport for SilentX."""
 
 from src.monitors.baselines import (
     KSMaxDriftDetector,
+    PopulationStabilityIndexDetector,
     JensenShannonDivergenceDetector,
     AverageConfidenceEstimator,
     DifferenceOfConfidencesEstimator,
     AverageThresholdedConfidenceEstimator,
     CBPEPerformanceEstimator,
+    ConfidenceOptimalTransportEstimator,
 )
 from src.monitors.trustguard import (
     AttributionWeightedDriftMonitor,
@@ -16,11 +18,13 @@ from src.monitors.trustguard import (
 
 __all__ = [
     "KSMaxDriftDetector",
+    "PopulationStabilityIndexDetector",
     "JensenShannonDivergenceDetector",
     "AverageConfidenceEstimator",
     "DifferenceOfConfidencesEstimator",
     "AverageThresholdedConfidenceEstimator",
     "CBPEPerformanceEstimator",
+    "ConfidenceOptimalTransportEstimator",
     "AttributionWeightedDriftMonitor",
     "CrossArchitectureDisagreementMonitor",
     "TrustGuardCompositeMonitor",

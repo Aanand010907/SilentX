@@ -108,7 +108,7 @@ def main():
         })
 
     summary_df = pd.DataFrame(rows)
-    stream_metrics = oracle.evaluate_stream(window_evals, risk_alarm_threshold=0.45)
+    stream_metrics = oracle.evaluate_stream(window_evals, risk_alarm_threshold=tg_mon.alarm_threshold)
 
     out_csv = os.path.join("results", "poc_summary.csv")
     summary_df.to_csv(out_csv, index=False)
