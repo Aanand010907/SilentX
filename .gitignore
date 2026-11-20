@@ -43,3 +43,10 @@ results/*.pt
 # Temporary files
 docx_text.txt
 *.log
+
+# Workspace archives and sibling folders
+my friends/
+my project/
+my project.zip
+*.zip
+

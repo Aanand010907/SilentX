@@ -1,0 +1,736 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SilentX — TrustGuard Post-Deployment Monitoring Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- Top Navigation & System Status Bar -->
+  <header class="app-header">
+    <div class="header-brand">
+      <div class="brand-logo-glow">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M12 2L3 7v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V7l-9-5z"/>
+          <path d="M12 8v4M12 16h.01" stroke-width="2.5" stroke-linecap="round"/>
+        </svg>
+      </div>
+      <div>
+        <h1 class="brand-title">SILENTX <span class="brand-subtitle">// TrustGuard Monitor</span></h1>
+        <p class="brand-tagline">Label-Free Silent Model Degradation Auditing & Guardrails</p>
+      </div>
+    </div>
+
+    <div class="header-meta">
+      <div class="meta-pill pulse-emerald">
+        <span class="pulse-dot"></span>
+        <span class="meta-label">STATUS</span>
+        <span class="meta-value">STAGE 2 VERIFIED</span>
+      </div>
+      <div class="meta-pill">
+        <span class="meta-label">COMMIT</span>
+        <span class="meta-value mono">ac92dfd</span>
+      </div>
+      <div class="meta-pill">
+        <span class="meta-label">TESTS</span>
+        <span class="meta-value text-emerald">32/32 PASS</span>
+      </div>
+      <div class="meta-pill">
+        <span class="meta-label">AUROC</span>
+        <span class="meta-value text-cyan">0.8143</span>
+      </div>
+      <div class="meta-pill">
+        <span class="meta-label">AUPRC</span>
+        <span class="meta-value text-purple">0.9208</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- Navigation Tabs -->
+  <nav class="nav-tabs-bar">
+    <button class="nav-tab active" data-tab="electricity">
+      <span class="tab-icon">⚡</span> OpenML Electricity Stream (51 Windows)
+    </button>
+    <button class="nav-tab" data-tab="synthetic">
+      <span class="tab-icon">🧪</span> Synthetic 6-Regime Benchmark (36 Windows)
+    </button>
+    <button class="nav-tab" data-tab="impossibility">
+      <span class="tab-icon">⚖️</span> Pure Concept-Shift Impossibility Lab
+    </button>
+    <button class="nav-tab" data-tab="statistics">
+      <span class="tab-icon">📊</span> Moving-Block Bootstrap Statistical Matrix
+    </button>
+    <button class="nav-tab" data-tab="simulator">
+      <span class="tab-icon">🎮</span> Live Stress Simulator
+    </button>
+  </nav>
+
+  <!-- Main Container -->
+  <main class="main-container">
+
+    <!-- ============================================================= -->
+    <!-- TAB 1: OPENML ELECTRICITY STREAM -->
+    <!-- ============================================================= -->
+    <section id="tab-electricity" class="tab-content active">
+      
+      <!-- Replay Controller Bar -->
+      <div class="control-panel glass-card">
+        <div class="replay-controls">
+          <button id="btn-play" class="btn btn-primary">
+            <span id="play-icon">▶</span> <span id="play-text">Auto Replay</span>
+          </button>
+          <button id="btn-prev" class="btn btn-secondary">⏮ Prev Window</button>
+          <button id="btn-next" class="btn btn-secondary">Next Window ⏭</button>
+          <button id="btn-reset" class="btn btn-ghost">↺ Reset</button>
+        </div>
+
+        <div class="scrubber-container">
+          <label for="window-slider" class="slider-label">
+            Window Progress: <span id="slider-val" class="mono text-cyan">Window 0 / 50</span>
+            <span class="text-muted">(25,312 Deployment Instances)</span>
+          </label>
+          <input type="range" id="window-slider" min="0" max="50" value="0" class="custom-slider">
+        </div>
+
+        <div class="filter-controls">
+          <label class="filter-label">Filter Stream:</label>
+          <select id="window-filter" class="custom-select">
+            <option value="all">All 51 Windows</option>
+            <option value="degraded">Degraded Only (ΔAcc ≥ 0.05)</option>
+            <option value="benign">Benign Only (ΔAcc < 0.02)</option>
+            <option value="alarm">TrustGuard Alarms Only</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Live Window Dashboard Grid -->
+      <div class="dashboard-grid">
+        
+        <!-- Current Window Hero Card -->
+        <div class="glass-card hero-card">
+          <div class="card-header">
+            <div>
+              <span class="badge badge-subtle">STREAMING REPLAY</span>
+              <h2 id="hero-title" class="hero-title">Window #0 <span class="text-muted">(0 – 500)</span></h2>
+            </div>
+            <div id="hero-alert-badge" class="alert-badge badge-normal">
+              NORMAL OPERATION
+            </div>
+          </div>
+
+          <div class="hero-metrics-grid">
+            <div class="metric-box">
+              <span class="metric-label">True Oracle Accuracy</span>
+              <div class="metric-value-row">
+                <span id="val-true-acc" class="metric-num text-emerald">82.4%</span>
+                <span id="val-deg" class="metric-diff text-muted">Δ 0.0%</span>
+              </div>
+              <span class="metric-sub">Sequestered Ground Truth</span>
+            </div>
+
+            <div class="metric-box">
+              <span class="metric-label">TrustGuard Composite Risk</span>
+              <div class="metric-value-row">
+                <span id="val-tg-risk" class="metric-num text-cyan">0.024</span>
+                <span class="metric-thresh">τ = 0.041</span>
+              </div>
+              <span id="val-alarm-status" class="metric-sub text-emerald">Below Alarm Threshold</span>
+            </div>
+
+            <div class="metric-box">
+              <span class="metric-label">Best Estimator: COTT</span>
+              <div class="metric-value-row">
+                <span id="val-cott-est" class="metric-num text-emerald">81.8%</span>
+                <span id="val-cott-err" class="metric-diff text-emerald">Err: 0.6%</span>
+              </div>
+              <span class="metric-sub">Published Optimal Transport</span>
+            </div>
+
+            <div class="metric-box">
+              <span class="metric-label">Confidence Proxy: CBPE</span>
+              <div class="metric-value-row">
+                <span id="val-cbpe-est" class="metric-num text-rose">86.2%</span>
+                <span id="val-cbpe-err" class="metric-diff text-rose">Err: +3.8%</span>
+              </div>
+              <span class="metric-sub">NannyML Poisson-Binomial</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- TrustGuard Multi-Signal Breakdown -->
+        <div class="glass-card signals-card">
+          <div class="card-header">
+            <h3 class="card-title">TrustGuard Multi-Signal Architecture</h3>
+            <span class="badge badge-cyan">MODEL-AWARE</span>
+          </div>
+
+          <div class="signal-bars-container">
+            <div class="signal-row">
+              <div class="signal-info">
+                <span class="signal-name">S_attr : Attribution Drift (Linear SHAP)</span>
+                <span id="bar-val-attr" class="signal-val mono">0.124</span>
+              </div>
+              <div class="progress-track">
+                <div id="bar-fill-attr" class="progress-fill fill-cyan" style="width: 25%;"></div>
+              </div>
+            </div>
+
+            <div class="signal-row">
+              <div class="signal-info">
+                <span class="signal-name">S_dis : Cross-Arch Disagreement (Tree vs MLP)</span>
+                <span id="bar-val-dis" class="signal-val mono">0.098</span>
+              </div>
+              <div class="progress-track">
+                <div id="bar-fill-dis" class="progress-fill fill-purple" style="width: 19%;"></div>
+              </div>
+            </div>
+
+            <div class="signal-row">
+              <div class="signal-info">
+                <span class="signal-name">S_conf : Conformal Ambiguity / Abstention</span>
+                <span id="bar-val-conf" class="signal-val mono">0.240</span>
+              </div>
+              <div class="progress-track">
+                <div id="bar-fill-conf" class="progress-fill fill-amber" style="width: 48%;"></div>
+              </div>
+            </div>
+
+            <div class="signal-row">
+              <div class="signal-info">
+                <span class="signal-name">S_grad : Pseudo-Label Gradient Stress (GdScore)</span>
+                <span id="bar-val-grad" class="signal-val mono">0.012</span>
+              </div>
+              <div class="progress-track">
+                <div id="bar-fill-grad" class="progress-fill fill-emerald" style="width: 5%;"></div>
+              </div>
+            </div>
+
+            <div class="signal-row">
+              <div class="signal-info">
+                <span class="signal-name">S_d3m : Variational Bayesian Disagreement</span>
+                <span id="bar-val-d3m" class="signal-val mono">0.450</span>
+              </div>
+              <div class="progress-track">
+                <div id="bar-fill-d3m" class="progress-fill fill-rose" style="width: 45%;"></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="paradox-callout">
+            <div class="callout-icon">💡</div>
+            <div class="callout-body">
+              <strong>The Monitoring Paradox Inspector:</strong>
+              <span id="paradox-explanation">
+                Notice that univariate input drift (KS Max = <span id="val-ks-max" class="mono text-rose">1.00</span>) triggers continuous saturation due to temporal index drift, whereas TrustGuard weights attribution by model reliance to avoid false novelty alarms.
+              </span>
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Real-Time Multi-Estimator Stream Chart -->
+      <div class="glass-card chart-card">
+        <div class="card-header chart-header">
+          <div>
+            <h3 class="card-title">Chronological Deployment Trajectory (51 Windows)</h3>
+            <p class="card-subtitle">Comparing True Oracle Performance against COTT, Scalar OT, ATC (tie-weighted), CBPE, and DoC</p>
+          </div>
+          <div class="chart-legend">
+            <span class="legend-item"><span class="legend-dot dot-gold"></span> True Acc</span>
+            <span class="legend-item"><span class="legend-dot dot-emerald"></span> Published COTT</span>
+            <span class="legend-item"><span class="legend-dot dot-sky"></span> Scalar OT</span>
+            <span class="legend-item"><span class="legend-dot dot-purple"></span> ATC</span>
+            <span class="legend-item"><span class="legend-dot dot-rose"></span> CBPE</span>
+            <span class="legend-item"><span class="legend-dot dot-cyan-fill"></span> TrustGuard Risk</span>
+          </div>
+        </div>
+
+        <div class="svg-chart-container" id="chart-container">
+          <svg id="stream-chart" class="stream-svg" viewBox="0 0 1000 320" preserveAspectRatio="none">
+            <!-- Dynamic SVG Chart injected via app.js -->
+          </svg>
+          <div id="chart-tooltip" class="chart-tooltip"></div>
+        </div>
+      </div>
+
+      <!-- Windows Table Explorer -->
+      <div class="glass-card table-card">
+        <div class="card-header">
+          <h3 class="card-title">Chronological Windows Inspection Log</h3>
+          <span class="badge badge-subtle">Click row to inspect window</span>
+        </div>
+        <div class="table-scroll">
+          <table class="data-table" id="table-electricity">
+            <thead>
+              <tr>
+                <th>Window ID</th>
+                <th>Sample Span</th>
+                <th>True Acc</th>
+                <th>True Degradation</th>
+                <th>Status</th>
+                <th>TG Risk</th>
+                <th>Alarm</th>
+                <th>COTT Est</th>
+                <th>Scalar OT</th>
+                <th>ATC Est</th>
+                <th>CBPE Est</th>
+                <th>KS Max</th>
+              </tr>
+            </thead>
+            <tbody id="tbody-electricity">
+              <!-- Injected by app.js -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- ============================================================= -->
+    <!-- TAB 2: SYNTHETIC 6-REGIME BENCHMARK -->
+    <!-- ============================================================= -->
+    <section id="tab-synthetic" class="tab-content">
+      <div class="glass-card">
+        <div class="card-header">
+          <div>
+            <h2 class="card-title">Multi-Seed Controlled Synthetic Stream Suite</h2>
+            <p class="card-subtitle">Evaluating 6 distinct distribution shift regimes across seeds 42, 123, and 999 (36 total windows)</p>
+          </div>
+          <div class="seed-selector">
+            <span class="filter-label">Filter Seed:</span>
+            <select id="synth-seed-filter" class="custom-select">
+              <option value="all">All Seeds (42, 123, 999)</option>
+              <option value="42">Seed 42</option>
+              <option value="123">Seed 123</option>
+              <option value="999">Seed 999</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="regime-cards-grid">
+          <!-- In-Distribution Card -->
+          <div class="regime-card">
+            <div class="regime-header">
+              <span class="badge badge-emerald">BASELINE</span>
+              <h4>In-Distribution</h4>
+            </div>
+            <p class="regime-desc">Stationary source distribution P(X, Y). Establishes baseline false-positive floor.</p>
+            <div class="regime-stats">
+              <div>True Acc: <strong>79.9%</strong></div>
+              <div>TG Risk: <strong>0.035</strong></div>
+              <div>Alarm Rate: <strong class="text-emerald">16.7%</strong></div>
+              <div>ATC Est: <strong>79.3%</strong> (Exact)</div>
+            </div>
+          </div>
+
+          <!-- Harmless Drift Card -->
+          <div class="regime-card">
+            <div class="regime-header">
+              <span class="badge badge-amber">BENIGN COVARIATE</span>
+              <h4>Harmless Drift</h4>
+            </div>
+            <p class="regime-desc">Massive mean/variance shift (+4.5σ to +9.0σ) isolated exclusively to uninformative noise features X5..X9.</p>
+            <div class="regime-stats">
+              <div>True Acc: <strong>78.2%</strong> (Δ -1.6%)</div>
+              <div>TG Risk: <strong>0.193</strong></div>
+              <div>Alarm Rate: <strong class="text-rose">100.0%</strong> (False Alarm)</div>
+              <div>Linear Attr S_attr: <strong>0.237</strong></div>
+            </div>
+          </div>
+
+          <!-- Correlation Collapse Card -->
+          <div class="regime-card">
+            <div class="regime-header">
+              <span class="badge badge-rose">MALIGNANT SHIFT</span>
+              <h4>Correlation Collapse</h4>
+            </div>
+            <p class="regime-desc">Correlation between proxy X3 and causal driver X0 inverts, pushing instances off-manifold.</p>
+            <div class="regime-stats">
+              <div>True Acc: <strong>75.2%</strong> (Δ -4.5%)</div>
+              <div>TG Risk: <strong>0.089</strong></div>
+              <div>Alarm Rate: <strong class="text-emerald">100.0%</strong> (Detected)</div>
+              <div>COTT Est: <strong>68.8%</strong></div>
+            </div>
+          </div>
+
+          <!-- Prior Shift Card -->
+          <div class="regime-card">
+            <div class="regime-header">
+              <span class="badge badge-cyan">PREVALENCE SHIFT</span>
+              <h4>Prior / Label Shift</h4>
+            </div>
+            <p class="regime-desc">Target class prevalence shifts via logit intercept modulation while P(X|Y) remains invariant.</p>
+            <div class="regime-stats">
+              <div>True Acc: <strong>77.2%</strong></div>
+              <div>TG Risk: <strong>0.035</strong></div>
+              <div>Alarm Rate: <strong class="text-emerald">16.7%</strong></div>
+              <div>ATC Est: <strong>79.3%</strong></div>
+            </div>
+          </div>
+
+          <!-- Concept Shift Card -->
+          <div class="regime-card">
+            <div class="regime-header">
+              <span class="badge badge-purple">CONCEPT ROTATION</span>
+              <h4>Concept Shift</h4>
+            </div>
+            <p class="regime-desc">Decision hyperplane rotates while observable marginal distribution P(X) = N(0, I) is strictly invariant.</p>
+            <div class="regime-stats">
+              <div>True Acc: <strong>33.4%</strong> (Collapse)</div>
+              <div>TG Risk: <strong>0.047</strong></div>
+              <div>Alarm Rate: <strong class="text-amber">50.0%</strong></div>
+              <div>COTT Est: <strong>72.0%</strong> (Blind)</div>
+            </div>
+          </div>
+
+          <!-- Confidence Collapse Card -->
+          <div class="regime-card">
+            <div class="regime-header">
+              <span class="badge badge-rose">OVERCONFIDENT COLLAPSE</span>
+              <h4>Confidence Collapse</h4>
+            </div>
+            <p class="regime-desc">Extreme OOD extrapolation on causal features. Models output 98% confidence while actual labels are completely inverted.</p>
+            <div class="regime-stats">
+              <div>True Acc: <strong class="text-rose">1.0%</strong></div>
+              <div>TG Risk: <strong class="text-rose">0.190</strong> (Alarm)</div>
+              <div>Alarm Rate: <strong class="text-emerald">100.0%</strong></div>
+              <div>CBPE Failure: <strong class="text-rose">96.8%</strong></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="table-scroll mt-4">
+          <table class="data-table" id="table-synthetic">
+            <thead>
+              <tr>
+                <th>Seed</th>
+                <th>Window</th>
+                <th>Regime</th>
+                <th>Severity</th>
+                <th>True Acc</th>
+                <th>Degradation</th>
+                <th>TG Risk</th>
+                <th>Alarm</th>
+                <th>ATC Est</th>
+                <th>COTT Est</th>
+                <th>CBPE Est</th>
+                <th>S_attr</th>
+                <th>S_dis</th>
+              </tr>
+            </thead>
+            <tbody id="tbody-synthetic">
+              <!-- Injected by app.js -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================================================= -->
+    <!-- TAB 3: CONCEPT SHIFT IMPOSSIBILITY LAB -->
+    <!-- ============================================================= -->
+    <section id="tab-impossibility" class="tab-content">
+      <div class="glass-card">
+        <div class="card-header">
+          <div>
+            <h2 class="card-title">Pure Concept-Shift Impossibility Boundary Lab</h2>
+            <p class="card-subtitle">Empirical Controlled Experiment with Two Worlds Sharing 100% Identical Feature Observations X</p>
+          </div>
+          <span class="badge badge-purple">THEORETICAL BOUNDARY</span>
+        </div>
+
+        <div class="impossibility-banner">
+          <div class="banner-icon">⚖️</div>
+          <div>
+            <h4>Fundamental Impossibility Theorem (Cover & Thomas; Garg et al.)</h4>
+            <p>
+              When observable feature samples X are strictly identical and frozen model parameters θ remain constant, any label-free monitor is a deterministic function <code>f(X, θ)</code>. It is mathematically impossible for any label-free monitor to distinguish between stationary performance and a 56% collapse in accuracy without access to deployment ground-truth labels.
+            </p>
+          </div>
+        </div>
+
+        <div class="worlds-comparison-grid">
+          <!-- World A -->
+          <div class="world-card world-a">
+            <div class="world-tag">WORLD A (STATIONARY MECHANISM)</div>
+            <h3>Source Data Generating Mechanism</h3>
+            <p class="text-muted">Target labels generated from true source conditional probability P_S(Y|X).</p>
+
+            <div class="world-metric-list">
+              <div class="w-metric-row">
+                <span>True Oracle Accuracy:</span>
+                <span class="mono text-emerald font-bold">78.00%</span>
+              </div>
+              <div class="w-metric-row">
+                <span>True Accuracy Degradation:</span>
+                <span class="mono">0.0413</span>
+              </div>
+              <div class="w-metric-row">
+                <span>TrustGuard Risk Score:</span>
+                <span class="mono text-cyan">0.0348</span>
+              </div>
+              <div class="w-metric-row">
+                <span>TrustGuard Alarm:</span>
+                <span class="badge badge-emerald">FALSE (Normal)</span>
+              </div>
+              <div class="w-metric-row">
+                <span>Published COTT Estimate:</span>
+                <span class="mono">77.67%</span>
+              </div>
+              <div class="w-metric-row">
+                <span>ATC Estimate:</span>
+                <span class="mono">81.78%</span>
+              </div>
+              <div class="w-metric-row">
+                <span>Maximum KS Drift:</span>
+                <span class="mono">0.0933</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Equivalence Pillar -->
+          <div class="equivalence-pillar">
+            <div class="eq-badge">= 0.00000000</div>
+            <div class="eq-text">IDENTICAL INPUTS</div>
+            <div class="eq-arrow">⟷</div>
+            <div class="eq-desc">Exact zero delta across all label-free signals</div>
+          </div>
+
+          <!-- World B -->
+          <div class="world-card world-b">
+            <div class="world-tag tag-rose">WORLD B (CONCEPT INVERSION)</div>
+            <h3>Inverted Conditional Boundary</h3>
+            <p class="text-muted">Features X are 100% identical to World A, but target labels are completely inverted Y_B = 1 - Y_A.</p>
+
+            <div class="world-metric-list">
+              <div class="w-metric-row">
+                <span>True Oracle Accuracy:</span>
+                <span class="mono text-rose font-bold">22.00% (-56.0% Drop!)</span>
+              </div>
+              <div class="w-metric-row">
+                <span>True Accuracy Degradation:</span>
+                <span class="mono text-rose">0.6013</span>
+              </div>
+              <div class="w-metric-row">
+                <span>TrustGuard Risk Score:</span>
+                <span class="mono text-cyan">0.0348 (Identical!)</span>
+              </div>
+              <div class="w-metric-row">
+                <span>TrustGuard Alarm:</span>
+                <span class="badge badge-emerald">FALSE (Identical!)</span>
+              </div>
+              <div class="w-metric-row">
+                <span>Published COTT Estimate:</span>
+                <span class="mono">77.67% (Identical!)</span>
+              </div>
+              <div class="w-metric-row">
+                <span>ATC Estimate:</span>
+                <span class="mono">81.78% (Identical!)</span>
+              </div>
+              <div class="w-metric-row">
+                <span>Maximum KS Drift:</span>
+                <span class="mono">0.0933 (Identical!)</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="table-scroll mt-4">
+          <table class="data-table" id="table-impossibility">
+            <thead>
+              <tr>
+                <th>World Scenario</th>
+                <th>True Accuracy</th>
+                <th>Degradation</th>
+                <th>TG Risk</th>
+                <th>TG Alarm</th>
+                <th>COTT Est</th>
+                <th>Scalar OT</th>
+                <th>ATC Est</th>
+                <th>CBPE Est</th>
+                <th>DoC Est</th>
+                <th>KS Max</th>
+                <th>PSI Max</th>
+              </tr>
+            </thead>
+            <tbody id="tbody-impossibility">
+              <!-- Injected by app.js -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================================================= -->
+    <!-- TAB 4: STATISTICAL INFERENCE MATRIX -->
+    <!-- ============================================================= -->
+    <section id="tab-statistics" class="tab-content">
+      <div class="glass-card">
+        <div class="card-header">
+          <div>
+            <h2 class="card-title">Time-Series Statistical Significance & Inference Matrix</h2>
+            <p class="card-subtitle">Moving-Block Bootstrap (B = 2,000 Resamples, block length b = 3) with Benjamini-Hochberg FDR Control (q = 0.05)</p>
+          </div>
+          <span class="badge badge-cyan">RIGOROUS INFERENCE</span>
+        </div>
+
+        <div class="stats-summary-banner">
+          <div>
+            <strong>Finite-Sample Resampling Correction Verified:</strong> Empirical p-values use Davison & Hinkley (1997) formula <code>p = 2 * (min(count_le_0, count_ge_0) + 1) / (B + 1)</code>, strictly eliminating invalid <code>0.0000</code> p-values.
+          </div>
+        </div>
+
+        <div class="table-scroll mt-4">
+          <table class="data-table" id="table-statistics">
+            <thead>
+              <tr>
+                <th>Hypothesis Pair</th>
+                <th>Statistical Unit</th>
+                <th>Windows</th>
+                <th>Mean Error Diff (ΔMAE)</th>
+                <th>95% MBB CI (b=3)</th>
+                <th>MBB Raw p</th>
+                <th>b=2 Sens</th>
+                <th>b=5 Sens</th>
+                <th>b=8 Sens</th>
+                <th>Wilcoxon p</th>
+                <th>FDR Adj p</th>
+                <th>Significant?</th>
+              </tr>
+            </thead>
+            <tbody id="tbody-statistics">
+              <!-- Injected by app.js -->
+            </tbody>
+          </table>
+        </div>
+
+        <div class="grid-2 mt-4">
+          <div class="info-card">
+            <h4>🏆 Proven Findings</h4>
+            <ul>
+              <li><strong>COTT Significantly Defeats Confidence Proxies:</strong> COTT yields statistically lower error than CBPE, ATC, DoC, and AC across all 51 windows (all FDR-adjusted p ≤ 0.0084).</li>
+              <li><strong>Block Length Invariance:</strong> Sensitivity analysis across block sizes b ∈ {2, 3, 5, 8} proves significance is not an artifact of autocorrelation windowing.</li>
+              <li><strong>ATC Fractional Tie-Weighting:</strong> Prevents calibration step plateaus from inflating estimates on discrete probability outputs.</li>
+            </ul>
+          </div>
+
+          <div class="info-card alert-card-border">
+            <h4>⚠️ Documented Limitations</h4>
+            <ul>
+              <li><strong>Scalar OT vs COTT Equivalence:</strong> Published COTT does <em>not</em> demonstrate statistically significant superiority over 1D scalar OT (p = 0.5157; 95% CI covers zero [-0.0247, +0.0521]).</li>
+              <li><strong>Single-Stream Generalizability:</strong> Electricity is a single temporal dataset. Cross-domain generalizability requires TableShift and CIC-IDS benchmarks.</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================================================= -->
+    <!-- TAB 5: LIVE STRESS SIMULATOR -->
+    <!-- ============================================================= -->
+    <section id="tab-simulator" class="tab-content">
+      <div class="glass-card">
+        <div class="card-header">
+          <div>
+            <h2 class="card-title">Interactive Drift Stress Simulator</h2>
+            <p class="card-subtitle">Real-Time Synthesis: Modulate causal drivers vs uninformative noise to test TrustGuard's selective alarm response</p>
+          </div>
+          <span class="badge badge-emerald">LIVE SIMULATION</span>
+        </div>
+
+        <div class="simulator-grid">
+          <div class="sim-controls-panel">
+            <h3>Distribution Shift Modulators</h3>
+
+            <div class="slider-group">
+              <div class="slider-header">
+                <label>Noise Features Shift (X5 .. X9) — Harmless Covariate</label>
+                <span id="sim-val-noise" class="mono text-cyan">0.0 σ</span>
+              </div>
+              <input type="range" id="sim-slider-noise" min="0" max="6" step="0.5" value="0" class="custom-slider">
+              <span class="slider-hint">Shifts irrelevant non-causal features. True accuracy remains intact.</span>
+            </div>
+
+            <div class="slider-group">
+              <div class="slider-header">
+                <label>Causal Features Drift (X0, X1, X2) — Malignant Shift</label>
+                <span id="sim-val-causal" class="mono text-rose">0.0 σ</span>
+              </div>
+              <input type="range" id="sim-slider-causal" min="0" max="5" step="0.5" value="0" class="custom-slider">
+              <span class="slider-hint">Displaces primary decision drivers off the training manifold.</span>
+            </div>
+
+            <div class="slider-group">
+              <div class="slider-header">
+                <label>Correlation Decoupling (X0 vs X3) — Feature Collapse</label>
+                <span id="sim-val-corr" class="mono text-amber">0.0</span>
+              </div>
+              <input type="range" id="sim-slider-corr" min="0" max="1" step="0.1" value="0" class="custom-slider">
+              <span class="slider-hint">Breaks the statistical coupling between proxy X3 and driver X0.</span>
+            </div>
+
+            <div class="sim-actions">
+              <button id="btn-sim-reset" class="btn btn-secondary">Reset to In-Distribution</button>
+              <button id="btn-sim-preset-harmless" class="btn btn-ghost">Preset: 5σ Harmless Noise</button>
+              <button id="btn-sim-preset-collapse" class="btn btn-ghost">Preset: Severe Causal Collapse</button>
+            </div>
+          </div>
+
+          <div class="sim-output-panel">
+            <h3>Real-Time Monitor Response</h3>
+
+            <div class="sim-hero-box">
+              <div class="sim-risk-display">
+                <span class="sim-label">TrustGuard Composite Risk</span>
+                <span id="sim-out-risk" class="sim-risk-num text-cyan">0.035</span>
+                <span class="sim-thresh">Operational Threshold: τ = 0.041</span>
+              </div>
+              <div id="sim-out-badge" class="alert-badge badge-normal">NORMAL OPERATION</div>
+            </div>
+
+            <div class="sim-breakdown-list">
+              <div class="sim-breakdown-item">
+                <span>Linear Attribution Drift (S_attr):</span>
+                <span id="sim-out-attr" class="mono">0.124</span>
+              </div>
+              <div class="sim-breakdown-item">
+                <span>Cross-Architecture Disagreement (S_dis):</span>
+                <span id="sim-out-dis" class="mono">0.098</span>
+              </div>
+              <div class="sim-breakdown-item">
+                <span>Expected True Accuracy Drop (ΔAcc):</span>
+                <span id="sim-out-acc-drop" class="mono text-emerald">0.0%</span>
+              </div>
+              <div class="sim-breakdown-item">
+                <span>Univariate KS Max (Traditional Baseline):</span>
+                <span id="sim-out-ks" class="mono text-muted">0.088</span>
+              </div>
+            </div>
+
+            <div class="sim-diagnosis" id="sim-diagnosis-box">
+              <strong>Audit Insight:</strong> The model is operating in a stationary in-distribution regime. All monitoring signals remain within reference tolerance bounds.
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <footer class="app-footer">
+    <div class="footer-content">
+      <span>SilentX Research Project • Framework: <strong>TrustGuard</strong> • Commit <code>ac92dfd</code></span>
+      <span>Standards Alignment: <strong>NIST AI 800-4</strong> &amp; <strong>NIST AI RMF 1.0</strong></span>
+    </div>
+  </footer>
+
+  <!-- Load Data and Application Logic -->
+  <script src="data.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
